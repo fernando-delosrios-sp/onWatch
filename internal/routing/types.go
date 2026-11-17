@@ -118,6 +118,17 @@ type FeedbackInput struct {
 	Note             string  `json:"note"`
 	Session          string  `json:"session"`
 	Issue            string  `json:"issue"`
+
+	// CamelCase / alternate field aliases sent by pi-onwatch-jev and similar TypeScript clients.
+	StatusCodeCamel       int     `json:"statusCode,omitempty"`
+	TTFTMsCamel           float64 `json:"ttftMs,omitempty"`
+	LatencyMsCamel        float64 `json:"latencyMs,omitempty"`
+	PromptTokensCamel     int64   `json:"promptTokens,omitempty"`
+	CompletionTokensCamel int64   `json:"completionTokens,omitempty"`
+	CachedTokensCamel     int64   `json:"cachedTokens,omitempty"`
+	CostUSDCamel          float64 `json:"costUsd,omitempty"`
+	CooldownSecondsCamel  int     `json:"cooldownSeconds,omitempty"`
+	Reason                string  `json:"reason,omitempty"`
 }
 
 // FeedbackEvent is a persisted row in routing_feedback.
@@ -194,16 +205,22 @@ type PoolStatus struct {
 
 // CandidateModel is one candidate route returned to callers for Jev selection.
 type CandidateModel struct {
-	Model           string  `json:"model"`
-	Pool            string  `json:"pool"`
-	Harness         string  `json:"harness"`
-	Provider        string  `json:"provider"`
-	Overlay         string  `json:"overlay,omitempty"`
-	Billing         string  `json:"billing"`
-	Description     string  `json:"description,omitempty"`
-	Priority        int     `json:"priority"`
-	InputCostPer1M  float64 `json:"input_cost_per_1m,omitempty"`
-	OutputCostPer1M float64 `json:"output_cost_per_1m,omitempty"`
+	ID               string   `json:"id,omitempty"`
+	Tier             Tier     `json:"tier,omitempty"`
+	Model            string   `json:"model"`
+	Pool             string   `json:"pool"`
+	Harness          string   `json:"harness"`
+	Provider         string   `json:"provider"`
+	Status           string   `json:"status,omitempty"`
+	Weight           int      `json:"weight,omitempty"`
+	Overlay          string   `json:"overlay,omitempty"`
+	UnderlyingModel  string   `json:"underlying_model,omitempty"`
+	UnderlyingModels []string `json:"underlying_models,omitempty"`
+	Billing          string   `json:"billing"`
+	Description      string   `json:"description,omitempty"`
+	Priority         int      `json:"priority"`
+	InputCostPer1M   float64  `json:"input_cost_per_1m,omitempty"`
+	OutputCostPer1M  float64  `json:"output_cost_per_1m,omitempty"`
 }
 
 // TierSelection is the winning route for a single tier.
@@ -237,12 +254,23 @@ type TierFallback struct {
 	Candidates []CandidateModel `json:"candidates"`
 }
 
+// RouteOptions controls route selection for GET /api/route.
+type RouteOptions struct {
+	Harnesses  []string
+	Tier       Tier
+	StickyPool string
+	Exclude    []string
+}
+
 // RouteResponse is returned by GET /api/route.
 type RouteResponse struct {
-	GeneratedAt        time.Time              `json:"generated_at"`
-	RequestedHarnesses []string               `json:"requested_harnesses,omitempty"`
-	Tiers              map[Tier]TierSelection `json:"tiers"`
-	Pools              []PoolStatus           `json:"pools"`
+	GeneratedAt        time.Time                 `json:"generated_at"`
+	RequestedHarnesses []string                  `json:"requested_harnesses,omitempty"`
+	Tiers              map[Tier][]CandidateModel `json:"tiers"`
+	TierSelections     map[Tier]TierSelection    `json:"tier_selections"`
+	Pools              []PoolStatus              `json:"pools"`
+	StickyPool         string                    `json:"stickyPool,omitempty"`
+	Stale              bool                      `json:"stale"`
 }
 
 // ProbeSettings holds non-secret status and configuration for routing probes.

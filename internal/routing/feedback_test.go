@@ -38,7 +38,7 @@ func TestFeedbackCooldownFreeGatingAndGoogleSpendTracking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Tiers[TierWorkhorse].Pool == "nvidia-free" {
+	if resp.TierSelections[TierWorkhorse].Pool == "nvidia-free" {
 		t.Fatalf("expected nvidia-free to be gated after consecutive startup failures")
 	}
 
@@ -50,8 +50,8 @@ func TestFeedbackCooldownFreeGatingAndGoogleSpendTracking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp2.Tiers[TierWorkhorse].Pool != "nvidia-free" {
-		t.Fatalf("expected nvidia-free restored after ClearCooldown, got %s", resp2.Tiers[TierWorkhorse].Pool)
+	if resp2.TierSelections[TierWorkhorse].Pool != "nvidia-free" {
+		t.Fatalf("expected nvidia-free restored after ClearCooldown, got %s", resp2.TierSelections[TierWorkhorse].Pool)
 	}
 
 	// 3. Token-estimated + explicit cost_usd feedback accumulates real spend on google-ai-studio ($15 cap)

@@ -129,17 +129,33 @@ func (h *Handler) serveAsset(w http.ResponseWriter, name, contentType string) {
 	_, _ = w.Write(data)
 }
 
-// Route handles GET /api/route?harnesses=...
+// Route handles GET /api/route?harnesses=...&tier=...&pool=...&exclude=...
 func (h *Handler) Route(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	harnesses := r.URL.Query()["harnesses"]
-	if raw := r.URL.Query().Get("harness"); raw != "" {
+	q := r.URL.Query()
+	harnesses := q["harnesses"]
+	if raw := q.Get("harness"); raw != "" {
 		harnesses = append(harnesses, raw)
 	}
-	resp, err := h.engine.SelectRoute(r.Context(), harnesses, time.Now().UTC())
+	var tier Tier
+	if rawTier := strings.TrimSpace(q.Get("tier")); rawTier != "" {
+		t := Tier(strings.ToLower(rawTier))
+		if !ValidTier(t) {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid tier %q", rawTier))
+			return
+		}
+		tier = t
+	}
+	opts := RouteOptions{
+		Harnesses:  harnesses,
+		Tier:       tier,
+		StickyPool: strings.TrimSpace(q.Get("pool")),
+		Exclude:    q["exclude"],
+	}
+	resp, err := h.engine.SelectRouteWithOptions(r.Context(), opts, time.Now().UTC())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return

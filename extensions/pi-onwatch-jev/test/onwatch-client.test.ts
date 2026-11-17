@@ -77,6 +77,39 @@ test("normalizeRouteResponse filters capped/cooling models and supports flat can
     ],
   });
   assert.equal(flat.tiers.frontier?.[0].id, "cursor/claude-sonnet-4-6");
+
+  const goPayload = normalizeRouteResponse({
+    generated_at: "2026-11-17T12:00:00Z",
+    requested_harnesses: ["pi"],
+    stale: false,
+    tiers: {
+      lightweight: [
+        {
+          id: "openrouter/@preset/code-nvidia",
+          tier: "lightweight",
+          harness: "pi",
+          provider: "openrouter",
+          model: "@preset/code-nvidia",
+          overlay: "@preset/code-nvidia",
+          underlying_model: "nvidia/nemotron-3.5-lightning:free",
+          underlying_models: ["nvidia/nemotron-3.5-lightning:free"],
+          description: "$0 fast Nemotron Lightning",
+          pool: "nvidia-free",
+          status: "ready",
+          weight: 100,
+        },
+      ],
+      workhorse: [],
+      frontier: [],
+    },
+    tier_selections: {
+      lightweight: { tier: "lightweight", available: true, pool: "nvidia-free" },
+    },
+    pools: [{ pool: { id: "nvidia-free" }, eligible: true }],
+  });
+  assert.equal(goPayload.stale, false);
+  assert.equal(goPayload.tiers.lightweight?.[0].id, "openrouter/@preset/code-nvidia");
+  assert.equal(goPayload.tiers.workhorse, undefined);
 });
 
 test("HttpOnWatchClient sends query params, basic auth, and feedback", async () => {

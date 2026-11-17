@@ -140,11 +140,17 @@ func TestSelectRoutePerTierPiPreferenceAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Tiers[TierWorkhorse].Pool != "nvidia-free" || resp.Tiers[TierWorkhorse].Overlay != "@preset/code-nvidia" {
-		t.Fatalf("unexpected workhorse route: %+v", resp.Tiers[TierWorkhorse])
+	if resp.TierSelections[TierWorkhorse].Pool != "nvidia-free" || resp.TierSelections[TierWorkhorse].Overlay != "@preset/code-nvidia" {
+		t.Fatalf("unexpected workhorse route: %+v", resp.TierSelections[TierWorkhorse])
 	}
-	if resp.Tiers[TierFrontier].Pool != "antigravity-3p" || resp.Tiers[TierFrontier].Harness != "pi" {
-		t.Fatalf("expected frontier antigravity-3p with pi preference, got %+v", resp.Tiers[TierFrontier])
+	if len(resp.Tiers[TierWorkhorse]) != 1 || resp.Tiers[TierWorkhorse][0].ID != "openrouter/@preset/code-nvidia" || resp.Tiers[TierWorkhorse][0].Provider != "openrouter" {
+		t.Fatalf("expected pi preset normalization for workhorse, got %+v", resp.Tiers[TierWorkhorse])
+	}
+	if resp.TierSelections[TierFrontier].Pool != "antigravity-3p" || resp.TierSelections[TierFrontier].Harness != "pi" {
+		t.Fatalf("expected frontier antigravity-3p with pi preference, got %+v", resp.TierSelections[TierFrontier])
+	}
+	if len(resp.Tiers[TierFrontier]) != 2 || resp.Tiers[TierFrontier][0].Status != "ready" {
+		t.Fatalf("expected 2 ready frontier candidates, got %+v", resp.Tiers[TierFrontier])
 	}
 
 	// 2. Cursor-only harness filters out pi-only and antigravity routes -> frontier picks cursor
@@ -152,8 +158,8 @@ func TestSelectRoutePerTierPiPreferenceAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cursorResp.Tiers[TierFrontier].Pool != "cursor" || cursorResp.Tiers[TierFrontier].Harness != "cursor" {
-		t.Fatalf("expected cursor-only frontier route, got %+v", cursorResp.Tiers[TierFrontier])
+	if cursorResp.TierSelections[TierFrontier].Pool != "cursor" || cursorResp.TierSelections[TierFrontier].Harness != "cursor" {
+		t.Fatalf("expected cursor-only frontier route, got %+v", cursorResp.TierSelections[TierFrontier])
 	}
 
 	// 3. OverridePiPreference on native antigravity frontier route flips antigravity-3p harness from pi -> antigravity
@@ -171,8 +177,66 @@ func TestSelectRoutePerTierPiPreferenceAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ovrResp.Tiers[TierFrontier].Harness != "antigravity" {
-		t.Fatalf("expected OverridePiPreference to select antigravity harness, got %s", ovrResp.Tiers[TierFrontier].Harness)
+	if ovrResp.TierSelections[TierFrontier].Harness != "antigravity" {
+		t.Fatalf("expected OverridePiPreference to select antigravity harness, got %s", ovrResp.TierSelections[TierFrontier].Harness)
+	}
+}
+
+func TestSelectRouteStickyPoolExcludeAndTier(t *testing.T) {
+	_, rs := openTestRoutingDB(t)
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+
+	probes := mapProbeReader{
+		readings: map[string]ProbeReading{
+			"nvidia-free":      {ProbeStatus: "ok"},
+			"google-ai-studio": {ProbeStatus: "ok", HasQuotaUsage: true, UsedShare: 0.10, ElapsedShare: 0.50},
+			"xai":              {ProbeStatus: "ok", HasQuotaUsage: true, UsedShare: 0.90, ElapsedShare: 0.40},
+		},
+	}
+	eng := NewEngine(rs, probes)
+
+	// StickyPool honors an eligible pool and echoes StickyPool; excludes omit matching @preset or model IDs.
+	resp, err := eng.SelectRouteWithOptions(context.Background(), RouteOptions{
+		Harnesses:  []string{"pi"},
+		Tier:       TierWorkhorse,
+		StickyPool: "google-ai-studio",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StickyPool != "google-ai-studio" {
+		t.Fatalf("expected stickyPool google-ai-studio, got %q", resp.StickyPool)
+	}
+	if len(resp.Tiers) != 1 || len(resp.Tiers[TierWorkhorse]) != 1 || resp.Tiers[TierWorkhorse][0].ID != "openrouter/@preset/code-google" {
+		t.Fatalf("expected deduplicated @preset/code-google candidate, got %+v", resp.Tiers)
+	}
+	if len(resp.Tiers[TierWorkhorse][0].UnderlyingModels) != 2 {
+		t.Fatalf("expected 2 underlying models merged into @preset/code-google, got %+v", resp.Tiers[TierWorkhorse][0].UnderlyingModels)
+	}
+
+	// Excluding openrouter/@preset/code-nvidia skips nvidia-free on workhorse.
+	exclResp, err := eng.SelectRouteWithOptions(context.Background(), RouteOptions{
+		Harnesses: []string{"pi"},
+		Exclude:   []string{"openrouter/@preset/code-nvidia"},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exclResp.TierSelections[TierWorkhorse].Pool == "nvidia-free" {
+		t.Fatalf("expected nvidia-free excluded when openrouter/@preset/code-nvidia is excluded")
+	}
+
+	// Ahead-of-pace sticky pool is still eligible and gets status="ahead".
+	aheadResp, err := eng.SelectRouteWithOptions(context.Background(), RouteOptions{
+		Harnesses:  []string{"pi"},
+		Tier:       TierFrontier,
+		StickyPool: "xai",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aheadResp.Tiers[TierFrontier][0].Status != "ahead" {
+		t.Fatalf("expected status ahead for xai bucket 4, got %q", aheadResp.Tiers[TierFrontier][0].Status)
 	}
 }
 

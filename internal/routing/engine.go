@@ -227,6 +227,11 @@ func comparePoolStatus(a, b PoolStatus) bool {
 
 // SelectRoute evaluates pool economy and chooses the best route per tier for the requested harnesses.
 func (e *Engine) SelectRoute(ctx context.Context, harnesses []string, now time.Time) (*RouteResponse, error) {
+	return e.SelectRouteWithOptions(ctx, RouteOptions{Harnesses: harnesses}, now)
+}
+
+// SelectRouteWithOptions evaluates pool economy and chooses routes per tier with optional tier, sticky pool, and exclude filters.
+func (e *Engine) SelectRouteWithOptions(ctx context.Context, opts RouteOptions, now time.Time) (*RouteResponse, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	} else {
@@ -245,21 +250,64 @@ func (e *Engine) SelectRoute(ctx context.Context, harnesses []string, now time.T
 	if err != nil {
 		return nil, err
 	}
-	excluded := make(map[string]bool, len(excludedList))
+	excluded := make(map[string]bool, len(excludedList)+len(opts.Exclude))
 	for _, id := range excludedList {
-		excluded[strings.ToLower(strings.TrimSpace(id))] = true
+		if k := strings.ToLower(strings.TrimSpace(id)); k != "" {
+			excluded[k] = true
+		}
+	}
+	for _, raw := range opts.Exclude {
+		for _, part := range strings.Split(raw, ",") {
+			if k := strings.ToLower(strings.TrimSpace(part)); k != "" {
+				excluded[k] = true
+			}
+		}
 	}
 
-	normalizedHarnesses, harnessSet := normalizeHarnesses(harnesses)
-	tiers := make(map[Tier]TierSelection, len(AllTiers))
+	targetTiers := AllTiers
+	if opts.Tier != "" && ValidTier(opts.Tier) {
+		targetTiers = []Tier{opts.Tier}
+	}
 
-	for _, tier := range AllTiers {
+	stickyReq := strings.TrimSpace(opts.StickyPool)
+	orderedStatuses := statuses
+	stickyEligible := false
+	if stickyReq != "" {
+		for _, st := range statuses {
+			if st.Pool.ID == stickyReq && st.Eligible {
+				stickyEligible = true
+				break
+			}
+		}
+		if stickyEligible {
+			reordered := make([]PoolStatus, 0, len(statuses))
+			for _, st := range statuses {
+				if st.Pool.ID == stickyReq {
+					reordered = append(reordered, st)
+				}
+			}
+			for _, st := range statuses {
+				if st.Pool.ID != stickyReq {
+					reordered = append(reordered, st)
+				}
+			}
+			orderedStatuses = reordered
+		}
+	}
+
+	normalizedHarnesses, harnessSet := normalizeHarnesses(opts.Harnesses)
+	tiers := make(map[Tier][]CandidateModel, len(targetTiers))
+	tierSelections := make(map[Tier]TierSelection, len(targetTiers))
+	stickyHonored := false
+
+	for _, tier := range targetTiers {
 		sel := TierSelection{
 			Tier:       tier,
 			Candidates: []CandidateModel{},
 		}
+		routeCandidates := []CandidateModel{}
 
-		for _, st := range statuses {
+		for _, st := range orderedStatuses {
 			if !st.Eligible {
 				continue
 			}
@@ -268,7 +316,7 @@ func (e *Engine) SelectRoute(ctx context.Context, harnesses []string, now time.T
 				continue
 			}
 
-			winHarness, candidates := pickHarnessCandidates(poolModels, st.Pool.ID)
+			winHarness, candidates := pickHarnessCandidates(poolModels, st)
 			if len(candidates) == 0 {
 				continue
 			}
@@ -288,6 +336,10 @@ func (e *Engine) SelectRoute(ctx context.Context, harnesses []string, now time.T
 				sel.OnPace = st.OnPace
 				sel.Candidates = candidates
 				sel.Reason = fmt.Sprintf("bucket=%s rank=#%d used=%.0f%%", st.BucketLabel, st.PreferenceRank, st.UsedShare*100)
+				if stickyEligible && st.Pool.ID == stickyReq {
+					stickyHonored = true
+				}
+				routeCandidates = normalizeCandidatesForRouteResponse(candidates)
 			} else {
 				sel.Fallbacks = append(sel.Fallbacks, TierFallback{
 					Pool:       st.Pool.ID,
@@ -306,15 +358,22 @@ func (e *Engine) SelectRoute(ctx context.Context, harnesses []string, now time.T
 		if !sel.Available {
 			sel.Reason = "no eligible pool with matching harness models"
 		}
-		tiers[tier] = sel
+		tiers[tier] = routeCandidates
+		tierSelections[tier] = sel
 	}
 
-	return &RouteResponse{
+	resp := &RouteResponse{
 		GeneratedAt:        now,
 		RequestedHarnesses: normalizedHarnesses,
 		Tiers:              tiers,
+		TierSelections:     tierSelections,
 		Pools:              statuses,
-	}, nil
+		Stale:              false,
+	}
+	if stickyHonored {
+		resp.StickyPool = stickyReq
+	}
+	return resp, nil
 }
 
 func normalizeHarnesses(harnesses []string) ([]string, map[string]bool) {
@@ -339,13 +398,35 @@ func normalizeHarnesses(harnesses []string) ([]string, map[string]bool) {
 	return out, seen
 }
 
+func isModelExcluded(m RouteModel, excluded map[string]bool) bool {
+	if len(excluded) == 0 {
+		return false
+	}
+	if excluded[strings.ToLower(strings.TrimSpace(m.ModelID))] {
+		return true
+	}
+	if m.Provider != "" && excluded[strings.ToLower(strings.TrimSpace(m.Provider+"/"+m.ModelID))] {
+		return true
+	}
+	if m.Harness != "" && excluded[strings.ToLower(strings.TrimSpace(m.Harness+"/"+m.ModelID))] {
+		return true
+	}
+	if m.Overlay != "" {
+		ov := strings.ToLower(strings.TrimSpace(m.Overlay))
+		if excluded[ov] || excluded["openrouter/"+ov] {
+			return true
+		}
+	}
+	return false
+}
+
 func filterTierPoolModels(models []RouteModel, tier Tier, poolID string, harnessSet map[string]bool, excluded map[string]bool) []RouteModel {
 	var out []RouteModel
 	for _, m := range models {
 		if !m.Enabled || m.Tier != tier || m.PoolID != poolID {
 			continue
 		}
-		if excluded[strings.ToLower(strings.TrimSpace(m.ModelID))] {
+		if isModelExcluded(m, excluded) {
 			continue
 		}
 		if len(harnessSet) > 0 && !harnessSet[m.Harness] {
@@ -356,7 +437,26 @@ func filterTierPoolModels(models []RouteModel, tier Tier, poolID string, harness
 	return out
 }
 
-func pickHarnessCandidates(poolModels []RouteModel, poolID string) (string, []CandidateModel) {
+func candidateStatusForBucket(bucket int) string {
+	if bucket == 4 || bucket == 5 {
+		return "ahead"
+	}
+	return "ready"
+}
+
+func canonicalCandidateID(harness, provider, model string) string {
+	if harness == "pi" {
+		if provider != "" && strings.HasPrefix(model, provider+"/") {
+			return model
+		}
+		if provider != "" {
+			return provider + "/" + model
+		}
+	}
+	return harness + "/" + model
+}
+
+func pickHarnessCandidates(poolModels []RouteModel, st PoolStatus) (string, []CandidateModel) {
 	byHarness := make(map[string][]RouteModel)
 	overridePi := false
 	for _, m := range poolModels {
@@ -384,13 +484,18 @@ func pickHarnessCandidates(poolModels []RouteModel, poolID string) (string, []Ca
 
 	chosen := byHarness[chosenHarness]
 	sortRouteModels(chosen)
+	statusStr := candidateStatusForBucket(st.WaterfallBucket)
 	candidates := make([]CandidateModel, 0, len(chosen))
 	for _, m := range chosen {
 		candidates = append(candidates, CandidateModel{
+			ID:              canonicalCandidateID(m.Harness, m.Provider, m.ModelID),
+			Tier:            m.Tier,
 			Model:           m.ModelID,
-			Pool:            poolID,
+			Pool:            st.Pool.ID,
 			Harness:         m.Harness,
 			Provider:        m.Provider,
+			Status:          statusStr,
+			Weight:          st.Pool.Weight,
 			Overlay:         m.Overlay,
 			Billing:         m.Billing,
 			Description:     m.Description,
@@ -400,6 +505,43 @@ func pickHarnessCandidates(poolModels []RouteModel, poolID string) (string, []Ca
 		})
 	}
 	return chosenHarness, candidates
+}
+
+// normalizeCandidatesForRouteResponse converts Pi OpenRouter @preset/* routes so Pi resolves them
+// via the registered openrouter/@preset/* model IDs while preserving underlying model metadata.
+func normalizeCandidatesForRouteResponse(candidates []CandidateModel) []CandidateModel {
+	out := make([]CandidateModel, 0, len(candidates))
+	byID := make(map[string]int, len(candidates))
+
+	for _, c := range candidates {
+		norm := c
+		if c.Harness == "pi" && strings.HasPrefix(c.Overlay, "@preset/") {
+			norm.UnderlyingModel = c.Model
+			norm.UnderlyingModels = []string{c.Model}
+			norm.Provider = "openrouter"
+			norm.Model = c.Overlay
+			norm.ID = "openrouter/" + c.Overlay
+		}
+
+		if idx, exists := byID[norm.ID]; exists {
+			existing := &out[idx]
+			if norm.UnderlyingModel != "" {
+				existing.UnderlyingModels = append(existing.UnderlyingModels, norm.UnderlyingModel)
+			}
+			if norm.Description != "" && !strings.Contains(existing.Description, norm.Description) {
+				if existing.Description != "" {
+					existing.Description += "; " + norm.Description
+				} else {
+					existing.Description = norm.Description
+				}
+			}
+			continue
+		}
+
+		byID[norm.ID] = len(out)
+		out = append(out, norm)
+	}
+	return out
 }
 
 func sortRouteModels(models []RouteModel) {

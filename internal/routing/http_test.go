@@ -43,8 +43,26 @@ func TestHTTPHandlersEndToEnd(t *testing.T) {
 	if len(routeResp.Pools) != 11 {
 		t.Fatalf("expected 11 pools, got %d", len(routeResp.Pools))
 	}
-	if !routeResp.Tiers[TierWorkhorse].Available || routeResp.Tiers[TierWorkhorse].Pool != "nvidia-free" {
-		t.Fatalf("expected workhorse nvidia-free, got %+v", routeResp.Tiers[TierWorkhorse])
+	if !routeResp.TierSelections[TierWorkhorse].Available || routeResp.TierSelections[TierWorkhorse].Pool != "nvidia-free" {
+		t.Fatalf("expected workhorse nvidia-free, got %+v", routeResp.TierSelections[TierWorkhorse])
+	}
+	if len(routeResp.Tiers[TierWorkhorse]) == 0 || routeResp.Tiers[TierWorkhorse][0].ID != "openrouter/@preset/code-nvidia" {
+		t.Fatalf("expected pi preset normalized candidate in Tiers[workhorse], got %+v", routeResp.Tiers[TierWorkhorse])
+	}
+
+	// 2b. GET /api/route with tier, pool, exclude
+	piReq := httptest.NewRequest(http.MethodGet, "/api/route?harnesses=pi&tier=workhorse&exclude=openrouter/@preset/code-nvidia", nil)
+	piRR := httptest.NewRecorder()
+	mux.ServeHTTP(piRR, piReq)
+	if piRR.Code != http.StatusOK {
+		t.Fatalf("GET /api/route filtered returned %d: %s", piRR.Code, piRR.Body.String())
+	}
+	var piResp RouteResponse
+	if err := json.Unmarshal(piRR.Body.Bytes(), &piResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(piResp.Tiers) != 1 || len(piResp.Tiers[TierWorkhorse]) == 0 || piResp.Tiers[TierWorkhorse][0].Pool == "nvidia-free" {
+		t.Fatalf("expected filtered workhorse excluding nvidia-free, got %+v", piResp.Tiers)
 	}
 
 	// 3. POST /api/route/feedback (linear-t3-dispatcher payload shape)
@@ -54,6 +72,24 @@ func TestHTTPHandlersEndToEnd(t *testing.T) {
 	mux.ServeHTTP(fbRR, fbReq)
 	if fbRR.Code != http.StatusOK {
 		t.Fatalf("POST /api/route/feedback returned %d: %s", fbRR.Code, fbRR.Body.String())
+	}
+
+	// 3b. POST /api/route/feedback (pi-onwatch-jev camelCase payload without explicit pool)
+	piFB := `{"harness":"pi","provider":"openrouter","model":"@preset/code-google","outcome":"demoted","statusCode":500,"ttftMs":310,"latencyMs":920,"reason":"user ran /bad"}`
+	piFBReq := httptest.NewRequest(http.MethodPost, "/api/route/feedback", strings.NewReader(piFB))
+	piFBRR := httptest.NewRecorder()
+	mux.ServeHTTP(piFBRR, piFBReq)
+	if piFBRR.Code != http.StatusOK {
+		t.Fatalf("POST /api/route/feedback (pi camelCase) returned %d: %s", piFBRR.Code, piFBRR.Body.String())
+	}
+	var piFBRes struct {
+		OK     bool          `json:"ok"`
+		Event  FeedbackEvent `json:"event"`
+		Health PoolHealth    `json:"health"`
+	}
+	_ = json.Unmarshal(piFBRR.Body.Bytes(), &piFBRes)
+	if piFBRes.Event.PoolID != "google-ai-studio" || piFBRes.Event.Outcome != "bad" || piFBRes.Event.TTFTMs != 310 || piFBRes.Health.CooldownUntil == nil {
+		t.Fatalf("unexpected normalized pi feedback response: %+v", piFBRes)
 	}
 
 	// 4. GET /api/routing/state

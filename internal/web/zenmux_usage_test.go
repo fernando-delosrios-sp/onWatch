@@ -32,7 +32,7 @@ func TestZenmuxUsagePublicEndpoint(t *testing.T) {
 		zero := "0"
 		return &api.ZenmuxUsage{FetchedAt: time.Date(2026, 9, 3, 13, 0, 0, 0, time.UTC), Data: api.ZenmuxUsageData{TokensTotal: &zero, TokensByModel: []api.ZenmuxUsageBucket{{BizTime: "2026090312", ModelSlug: "sample/model", RequestCounts: &zero}}}}, nil
 	}
-	srv := httptest.NewServer(NewServer(9211, h, nil, "", "", "127.0.0.1", "", "", nil).httpServer.Handler)
+	srv := httptest.NewServer(NewServer(9211, h, nil, "", "", "127.0.0.1", "", "", nil, false).httpServer.Handler)
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/api/zenmux/usage?dimension=BIZ_DT&time=20260903&bill_type=subscription")
 	if err != nil {
@@ -47,7 +47,7 @@ func TestZenmuxUsagePublicEndpoint(t *testing.T) {
 		t.Fatalf("public usage payload invalid: %s %v", body, err)
 	}
 	// Authentication middleware covers the new endpoint as it does all dashboard APIs.
-	secure := httptest.NewServer(NewServer(9211, h, nil, "admin", "hash", "127.0.0.1", "", "", nil).httpServer.Handler)
+	secure := httptest.NewServer(NewServer(9211, h, nil, "admin", "hash", "127.0.0.1", "", "", nil, false).httpServer.Handler)
 	defer secure.Close()
 	res, err := http.Get(secure.URL + "/api/zenmux/usage?dimension=BIZ_DT&time=20260903")
 	if err != nil {

@@ -157,7 +157,7 @@
         const grid = document.getElementById('tier-preview-grid');
         if (!grid) return;
         const tiersOrder = ['frontier', 'workhorse', 'lightweight'];
-        const tiers = (routeResp && routeResp.tiers) || {};
+        const tiers = (routeResp && (routeResp.tier_selections || routeResp.tiers)) || {};
 
         grid.innerHTML = tiersOrder.map(function (tierName) {
             const sel = tiers[tierName] || { tier: tierName, available: false };

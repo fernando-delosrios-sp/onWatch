@@ -18,6 +18,7 @@ func (e *Engine) ApplyFeedback(ctx context.Context, in FeedbackInput, now time.T
 	} else {
 		now = now.UTC()
 	}
+	in = normalizeFeedbackInput(in)
 
 	poolID, matchedModel := e.resolveFeedbackTarget(in)
 	if poolID == "" {
@@ -194,6 +195,37 @@ func (e *Engine) ClearCooldown(poolID string, now time.Time) (*PoolHealth, error
 	return &h, nil
 }
 
+func normalizeFeedbackInput(in FeedbackInput) FeedbackInput {
+	if in.StatusCode == 0 {
+		in.StatusCode = in.StatusCodeCamel
+	}
+	if in.TTFTMs == 0 {
+		in.TTFTMs = in.TTFTMsCamel
+	}
+	if in.LatencyMs == 0 {
+		in.LatencyMs = in.LatencyMsCamel
+	}
+	if in.PromptTokens == 0 {
+		in.PromptTokens = in.PromptTokensCamel
+	}
+	if in.CompletionTokens == 0 {
+		in.CompletionTokens = in.CompletionTokensCamel
+	}
+	if in.CachedTokens == 0 {
+		in.CachedTokens = in.CachedTokensCamel
+	}
+	if in.CostUSD == 0 {
+		in.CostUSD = in.CostUSDCamel
+	}
+	if in.CooldownSeconds == 0 {
+		in.CooldownSeconds = in.CooldownSecondsCamel
+	}
+	if strings.TrimSpace(in.Note) == "" && strings.TrimSpace(in.Reason) != "" {
+		in.Note = strings.TrimSpace(in.Reason)
+	}
+	return in
+}
+
 func (e *Engine) resolveFeedbackTarget(in FeedbackInput) (string, *RouteModel) {
 	poolID := strings.TrimSpace(in.Pool)
 	modelID := strings.TrimSpace(in.Model)
@@ -213,6 +245,10 @@ func (e *Engine) resolveFeedbackTarget(in FeedbackInput) (string, *RouteModel) {
 			if modelID != "" {
 				if strings.EqualFold(m.ModelID, modelID) {
 					score += 4
+				} else if m.Overlay != "" && (strings.EqualFold(m.Overlay, modelID) || strings.EqualFold("openrouter/"+m.Overlay, modelID)) {
+					score += 3
+				} else if strings.EqualFold(m.Provider+"/"+m.ModelID, modelID) || strings.EqualFold(m.Harness+"/"+m.ModelID, modelID) {
+					score += 3
 				} else {
 					continue
 				}
@@ -248,7 +284,7 @@ func (e *Engine) resolveFeedbackTarget(in FeedbackInput) (string, *RouteModel) {
 		return "xai", nil
 	case "anthropic", "claude", "claudeagent":
 		return "claude", nil
-	case "openai", "codex":
+	case "openai", "codex", "openai-codex":
 		return "codex", nil
 	case "cursor":
 		return "cursor", nil
@@ -278,12 +314,15 @@ func classifyFeedback(in FeedbackInput) string {
 	event := strings.ToLower(strings.TrimSpace(in.Event))
 	outcome := strings.ToLower(strings.TrimSpace(in.Outcome))
 	errText := strings.ToLower(strings.TrimSpace(in.Error))
+	if errText == "" && outcome != "ok" && outcome != "success" && outcome != "demoted" && outcome != "bad" {
+		errText = strings.ToLower(strings.TrimSpace(in.Reason))
+	}
 
 	if in.StatusCode == 429 || outcome == "429" || outcome == "rate_limit" || event == "429" || event == "rate_limit" ||
-		strings.Contains(errText, "429") || strings.Contains(errText, "rate limit") || strings.Contains(errText, "too many requests") {
+		strings.Contains(errText, "429") || strings.Contains(errText, "rate limit") || strings.Contains(errText, "too many requests") || strings.Contains(errText, "quota exceeded") {
 		return "429"
 	}
-	if outcome == "bad" || event == "bad" || event == "/bad" {
+	if outcome == "bad" || outcome == "demoted" || event == "bad" || event == "/bad" || event == "demoted" {
 		return "bad"
 	}
 	if outcome == "ok" || outcome == "success" || event == "ok" || event == "success" {
