@@ -79,7 +79,7 @@ func (c *OpenRouterClient) FetchUsage(ctx context.Context) (*OpenRouterAuthKeyRe
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	url := c.baseURL + "/api/v1/auth/key"
+	url := c.baseURL + "/api/v1/key"
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("openrouter: creating request: %w", err)

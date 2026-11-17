@@ -2579,13 +2579,15 @@ function renderOpenRouterCard(credits, containerId) {
   const container = document.getElementById(containerId);
   if (!container) return;
 
-  const usagePct = (credits.percent || 0).toFixed(1);
-  const status = getQuotaStatus(credits.percent || 0);
-  const statusCfg = statusConfig[status] || statusConfig.healthy;
   const hasLimit = credits.limit != null && credits.limit > 0;
+  const usagePct = hasLimit ? (credits.percent || 0).toFixed(1) : null;
+  const status = hasLimit ? getQuotaStatus(credits.percent || 0) : 'healthy';
+  const statusCfg = statusConfig[status] || statusConfig.healthy;
   const usageStr = '$' + (credits.usage || 0).toFixed(4);
   const limitStr = hasLimit ? '$' + credits.limit.toFixed(4) : 'Unlimited';
   const remainStr = credits.remaining != null ? '$' + credits.remaining.toFixed(4) : '--';
+  const percentLabel = hasLimit ? `${usagePct}%` : 'Spent';
+  const barWidth = hasLimit ? `${usagePct}%` : '0%';
 
   container.innerHTML = `<article class="quota-card openrouter-card" data-quota="credits" data-provider="openrouter" style="animation-delay: 0ms">
     <header class="card-header">
@@ -2599,12 +2601,12 @@ function renderOpenRouterCard(credits, containerId) {
       <span class="countdown" id="countdown-openrouter-credits" style="display: none">--:--</span>
     </header>
     <div class="progress-stats">
-      <span class="usage-percent" id="percent-openrouter-credits">${usagePct}%</span>
+      <span class="usage-percent" id="percent-openrouter-credits">${percentLabel}</span>
       <span class="usage-fraction" id="fraction-openrouter-credits">${usageStr} / ${limitStr}</span>
     </div>
     <div class="progress-wrapper">
-      <div class="progress-bar" role="progressbar" aria-valuenow="${Math.round(credits.percent || 0)}" aria-valuemin="0" aria-valuemax="100">
-        <div class="progress-fill" id="progress-openrouter-credits" style="width: ${usagePct}%" data-status="${status}"></div>
+      <div class="progress-bar" role="progressbar" aria-valuenow="${hasLimit ? Math.round(credits.percent || 0) : 0}" aria-valuemin="0" aria-valuemax="100">
+        <div class="progress-fill" id="progress-openrouter-credits" style="width: ${barWidth}" data-status="${status}"></div>
       </div>
     </div>
     <footer class="card-footer">
@@ -2629,9 +2631,9 @@ function updateOpenRouterCard(credits) {
     isFreeTier: credits.isFreeTier
   };
 
-  const usagePct = (credits.percent || 0).toFixed(1);
-  const status = getQuotaStatus(credits.percent || 0);
   const hasLimit = credits.limit != null && credits.limit > 0;
+  const usagePct = hasLimit ? (credits.percent || 0).toFixed(1) : '—';
+  const status = hasLimit ? getQuotaStatus(credits.percent || 0) : 'healthy';
   const usageStr = '$' + (credits.usage || 0).toFixed(4);
   const limitStr = hasLimit ? '$' + credits.limit.toFixed(4) : 'Unlimited';
   const remainStr = credits.remaining != null ? '$' + credits.remaining.toFixed(4) : '--';
@@ -2642,16 +2644,18 @@ function updateOpenRouterCard(credits) {
   const statusEl = document.getElementById('status-openrouter-credits');
   const resetEl = document.getElementById('reset-openrouter-credits');
 
+  const percentLabel = hasLimit ? `${usagePct}%` : 'Spent';
+  const barWidth = hasLimit ? `${usagePct}%` : '0%';
   if (progressEl) {
-    progressEl.style.width = `${usagePct}%`;
+    progressEl.style.width = barWidth;
     progressEl.setAttribute('data-status', status);
   }
   if (percentEl) {
     const oldVal = prev ? prev.percent : 0;
-    if (Math.abs(oldVal - (credits.percent || 0)) > 0.2) {
+    if (hasLimit && Math.abs(oldVal - (credits.percent || 0)) > 0.2) {
       animateValue(percentEl, oldVal, credits.percent || 0, 400, v => `${v.toFixed(1)}%`);
     } else {
-      percentEl.textContent = `${usagePct}%`;
+      percentEl.textContent = percentLabel;
     }
   }
   if (fractionEl) fractionEl.textContent = `${usageStr} / ${limitStr}`;
