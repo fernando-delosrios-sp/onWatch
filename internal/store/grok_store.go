@@ -86,7 +86,8 @@ func (s *Store) QueryLatestGrok(accountID int64) (*api.GrokSnapshot, error) {
 	var email, teamID, loginMethod sql.NullString
 
 	err := s.db.QueryRow(
-		`SELECT id, captured_at, email, team_id, login_method, raw_json, quota_count, account_id FROM grok_snapshots WHERE account_id = ? ORDER BY captured_at DESC LIMIT 1`,
+		`SELECT id, captured_at, email, team_id, login_method, raw_json, quota_count, account_id
+		 FROM grok_snapshots WHERE account_id = ? AND quota_count > 0 ORDER BY captured_at DESC LIMIT 1`,
 		accountID,
 	).Scan(&snapshot.ID, &capturedAt, &email, &teamID, &loginMethod, &snapshot.RawJSON, new(int), &snapshot.AccountID)
 

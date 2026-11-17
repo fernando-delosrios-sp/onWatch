@@ -27,8 +27,9 @@ type GrokBillingUsage struct {
 // GrokBillingResponse is the shape returned by `x.ai/billing` RPC (and synthesized from web probe).
 // All monetary are cents via GrokCent.
 type GrokBillingResponse struct {
-	BillingCycle     *GrokBillingCycle `json:"billingCycle"`
-	MonthlyLimit     *GrokCent         `json:"monthlyLimit"`
+	CreditUsagePercent *float64          `json:"creditUsagePercent"`
+	BillingCycle       *GrokBillingCycle `json:"billingCycle"`
+	MonthlyLimit       *GrokCent         `json:"monthlyLimit"`
 	OnDemandCap      *GrokCent         `json:"onDemandCap"`
 	OnDemandEnabled  *bool             `json:"on_demand_enabled"`
 	DisabledByConfig *bool             `json:"disabledByConfig"`
@@ -115,6 +116,23 @@ func ParseGrokBillingResponse(data []byte) (*GrokBillingResponse, error) {
 func billingToUsedPercentAndReset(r *GrokBillingResponse) (used float64, resets *time.Time) {
 	if r == nil {
 		return 0, nil
+	}
+	if r.CreditUsagePercent != nil {
+		used = *r.CreditUsagePercent
+		if used < 0 {
+			used = 0
+		}
+		if used > 100 {
+			used = 100
+		}
+		if r.BillingCycle != nil && r.BillingCycle.BillingPeriodEnd != "" {
+			if t, err := time.Parse(time.RFC3339, r.BillingCycle.BillingPeriodEnd); err == nil {
+				resets = &t
+			} else if t, err := time.Parse(time.RFC3339Nano, r.BillingCycle.BillingPeriodEnd); err == nil {
+				resets = &t
+			}
+		}
+		return used, resets
 	}
 	limit := 0
 	if r.MonthlyLimit != nil && r.MonthlyLimit.Val != nil {

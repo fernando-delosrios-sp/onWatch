@@ -32,6 +32,10 @@ var (
 	ErrGrokParseFailed     = errors.New("grok: parse failed")
 )
 
+// grokCreditsConfigRequestFrame is the gRPC-web frame for GetGrokCreditsConfigRequest
+// with exclude_legacy_monthly_usage=false. Empty frames are rejected with grpc-status 13.
+var grokCreditsConfigRequestFrame = []byte{0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x00}
+
 // GrokClient handles fetching Grok credits usage via local auth + optional
 // `grok agent stdio` RPC and/or grok.com gRPC-web bearer probe.
 // No browser cookie import (portable daemon); bearer from auth.json is sufficient for web path.
@@ -137,14 +141,21 @@ func (c *GrokClient) FetchSnapshot(ctx context.Context) (*GrokSnapshot, error) {
 		c.logger.Debug("grok rpc attempt failed or not available", "error", err)
 	}
 
-	// 2. Web gRPC-web bearer probe (primary reliable path for daemon)
+	// 2. Grok CLI-proxy credits API (primary bearer path for SuperGrok / grok login)
+	if b, err := c.tryCLIProxyBilling(ctx, creds); err == nil && b != nil {
+		billing = b
+	} else if err != nil {
+		c.logger.Debug("grok cli-proxy billing failed", "error", err)
+	}
+
+	// 3. Web gRPC-web bearer probe (fallback when CLI-proxy is unavailable)
 	if w, err := c.tryWeb(ctx, creds); err == nil && w != nil {
 		web = w
 	} else if err != nil {
 		c.logger.Debug("grok web billing probe failed", "error", err)
 	}
 
-	// 3. Build snapshot
+	// 4. Build snapshot
 	var snap *GrokSnapshot
 	if billing != nil {
 		snap = billing.ToSnapshot(time.Now().UTC(), creds.Email, creds.TeamID, creds.LoginMethod(), web)
@@ -259,7 +270,7 @@ func (c *GrokClient) tryRPC(ctx context.Context, creds *GrokCredentials) (*GrokB
 	}
 
 	// billing request
-	if err := c.rpcSend(stdin, 2, "x.ai/billing", map[string]interface{}{}); err != nil {
+	if err := c.rpcSend(stdin, 2, "_x.ai/billing", map[string]interface{}{}); err != nil {
 		_ = stdin.Close()
 		return nil, err
 	}
@@ -359,8 +370,9 @@ func (c *GrokClient) tryWeb(ctx context.Context, creds *GrokCredentials) (*GrokW
 		return nil, ErrGrokUnauthorized
 	}
 
+	// GetGrokCreditsConfigRequest{exclude_legacy_monthly_usage:false} in a gRPC-web frame.
 	endpoint := "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x00, 0x00}))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(grokCreditsConfigRequestFrame))
 	if err != nil {
 		return nil, err
 	}
@@ -390,8 +402,8 @@ func (c *GrokClient) tryWeb(ctx context.Context, creds *GrokCredentials) (*GrokW
 		return nil, err
 	}
 
-	// Validate grpc status trailers/headers
-	if err := validateGRPCWebTrailersGo(body); err != nil {
+	// Validate grpc status trailers/headers (also HTTP headers when body is empty).
+	if err := validateGRPCWebResponseGo(body, resp.Header); err != nil {
 		return nil, err
 	}
 
@@ -400,11 +412,25 @@ func (c *GrokClient) tryWeb(ctx context.Context, creds *GrokCredentials) (*GrokW
 
 // --- Exact port of the Swift gRPC-web + protobuf heuristic scanner ---
 
-func validateGRPCWebTrailersGo(data []byte) error {
+func validateGRPCWebResponseGo(data []byte, httpHdr http.Header) error {
 	fields := grpcWebTrailerFieldsGo(data)
-	if raw := fields["grpc-status"]; raw != "" {
+	raw := fields["grpc-status"]
+	if raw == "" {
+		raw = httpHdr.Get("Grpc-Status")
+	}
+	if raw == "" {
+		raw = httpHdr.Get("grpc-status")
+	}
+	msg := fields["grpc-message"]
+	if msg == "" {
+		msg = httpHdr.Get("Grpc-Message")
+	}
+	if msg == "" {
+		msg = httpHdr.Get("grpc-message")
+	}
+	if raw != "" {
 		if st, err := strconv.Atoi(raw); err == nil && st != 0 {
-			return fmt.Errorf("%w: grpc-status=%d %s", ErrGrokInvalidResponse, st, fields["grpc-message"])
+			return fmt.Errorf("%w: grpc-status=%d %s", ErrGrokInvalidResponse, st, msg)
 		}
 	}
 	return nil
