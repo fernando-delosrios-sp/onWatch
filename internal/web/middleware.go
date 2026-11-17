@@ -260,6 +260,13 @@ func sessionAuthMiddlewareWithTrustedProxy(sessions *SessionStore, basePath stri
 				return
 			}
 
+			// Local model routing API endpoints (/api/route, /api/route/feedback, /api/route/catalog)
+			// are public for direct localhost callers such as Pi, t3-code, linear-t3-dispatcher, and or-iac.
+			if isLocalRoutingPublicPath(path, basePath) && isLoopbackRequest(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Optional: entire dashboard open on direct loopback (ONWATCH_LOOPBACK_OPEN).
 			if loopbackOpen && isLoopbackRequest(r) {
 				next.ServeHTTP(w, r)
@@ -403,7 +410,15 @@ func isStaticAsset(path string, basePath ...string) bool {
 	if len(basePath) > 0 {
 		bp = basePath[0]
 	}
-	return strings.HasPrefix(path, bp+"/static/") || path == bp+"/sw.js" || path == bp+"/manifest.json"
+	return strings.HasPrefix(path, bp+"/static/") || strings.HasPrefix(path, bp+"/routing/assets/") || path == bp+"/sw.js" || path == bp+"/manifest.json"
+}
+
+// isLocalRoutingPublicPath reports whether path is a machine-to-machine routing API endpoint
+// callable directly from localhost without browser session cookies or CSRF custom headers.
+func isLocalRoutingPublicPath(path, basePath string) bool {
+	return path == basePath+"/api/route" ||
+		path == basePath+"/api/route/feedback" ||
+		path == basePath+"/api/route/catalog"
 }
 
 // writeUnauthorized sends a 401 Unauthorized response.

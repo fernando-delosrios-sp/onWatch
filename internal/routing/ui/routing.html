@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Routing & Economy - onWatch</title>
+    <link rel="icon" type="image/svg+xml" href="{{.BasePath}}/static/favicon.svg">
+    <meta name="base-path" content="{{.BasePath}}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@400;500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{.BasePath}}/static/style.css">
+    <link rel="stylesheet" href="{{.BasePath}}/routing/assets/routing.css">
+    <script src="{{.BasePath}}/static/theme-init.js"></script>
+</head>
+<body>
+<div class="routing-page">
+    <header class="routing-header">
+        <div class="routing-header-left">
+            <a href="{{.BasePath}}/" class="settings-back" aria-label="Back to dashboard" title="Back to dashboard">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M19 12H5M12 19l-7-7 7-7"/>
+                </svg>
+            </a>
+            <div>
+                <h1 class="routing-title">Model Routing & Economy <span class="beta-tag">Router</span></h1>
+                <p class="routing-subtitle">Combined provider economy, waterfall preference order, and 3-tier model catalog</p>
+            </div>
+        </div>
+        <div class="routing-header-actions">
+            <button class="routing-btn" id="btn-refresh">Refresh</button>
+            <button class="routing-btn" id="btn-probe-all">Probe External APIs</button>
+            <a href="{{.BasePath}}/api/route/catalog" download="onwatch-catalog.yaml" class="routing-btn">Download YAML</a>
+            <a href="{{.BasePath}}/settings" class="routing-btn">Settings</a>
+            <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="5"/>
+                    <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                </svg>
+                <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Combined Economy KPIs -->
+    <section class="routing-kpi-grid" id="kpi-grid">
+        <div class="routing-kpi-card">
+            <div class="routing-kpi-label">Eligible Pools</div>
+            <div class="routing-kpi-value" id="kpi-eligible">--</div>
+            <div class="routing-kpi-sub" id="kpi-eligible-sub">Loading pool state...</div>
+        </div>
+        <div class="routing-kpi-card">
+            <div class="routing-kpi-label">On-Pace Subscription Pools</div>
+            <div class="routing-kpi-value" id="kpi-onpace">--</div>
+            <div class="routing-kpi-sub" id="kpi-onpace-sub">Waterfall buckets 2 &amp; 3</div>
+        </div>
+        <div class="routing-kpi-card">
+            <div class="routing-kpi-label">Dollar Cap Headroom</div>
+            <div class="routing-kpi-value" id="kpi-headroom">--</div>
+            <div class="routing-kpi-sub" id="kpi-headroom-sub">Spendable above reserves</div>
+        </div>
+        <div class="routing-kpi-card">
+            <div class="routing-kpi-label">Cooldown / Exhausted</div>
+            <div class="routing-kpi-value" id="kpi-blocked">--</div>
+            <div class="routing-kpi-sub" id="kpi-blocked-sub">Temporary or quota-exhausted</div>
+        </div>
+    </section>
+
+    <!-- Tabs -->
+    <div class="routing-tabs" role="tablist">
+        <button class="routing-tab active" data-tab="economy" role="tab" aria-selected="true">Combined Economy &amp; Preference</button>
+        <button class="routing-tab" data-tab="pools" role="tab" aria-selected="false">Pools, Caps &amp; Reserves</button>
+        <button class="routing-tab" data-tab="catalog" role="tab" aria-selected="false">3-Tier Model Catalog</button>
+        <button class="routing-tab" data-tab="probes" role="tab" aria-selected="false">Probes, YAML &amp; Feedback</button>
+    </div>
+
+    <!-- Tab 1: Combined Economy & Preference -->
+    <section class="routing-panel active" id="panel-economy">
+        <div class="routing-card">
+            <div class="routing-card-header">
+                <div>
+                    <h2 class="routing-card-title">Live 3-Tier Route Selection</h2>
+                    <p class="routing-card-desc">Winning pool, harness, preset/overlay, and candidates returned by <code>GET /api/route</code></p>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <label for="harness-preview-select" class="text-muted">Caller harnesses:</label>
+                    <select id="harness-preview-select" class="routing-select">
+                        <option value="">All harnesses</option>
+                        <option value="pi">pi only</option>
+                        <option value="pi,cursor,antigravity,grok,claudeAgent,codex" selected>pi + all native (default)</option>
+                        <option value="cursor">cursor only</option>
+                        <option value="claudeAgent,codex,grok">native CLIs only</option>
+                    </select>
+                </div>
+            </div>
+            <div class="tier-grid" id="tier-preview-grid"></div>
+        </div>
+
+        <div class="routing-card">
+            <div class="routing-card-header">
+                <div>
+                    <h2 class="routing-card-title">Combined Economy &amp; Provider Preference Order</h2>
+                    <p class="routing-card-desc">Live waterfall ranking across all 11 pools. Black vertical tick on each bar marks elapsed window share + pace slack.</p>
+                </div>
+            </div>
+            <div class="waterfall-legend">
+                <span class="badge badge-free">#1 Free (healthy)</span>
+                <span class="badge badge-onpace">#2 Monthly+Cooldown On Pace</span>
+                <span class="badge badge-onpace">#3 Monthly No-Cooldown On Pace</span>
+                <span class="badge badge-ahead">#4 Monthly+Cooldown Ahead</span>
+                <span class="badge badge-ahead">#5 Monthly No-Cooldown Ahead</span>
+                <span class="badge badge-payg">#6 PAYG</span>
+            </div>
+            <div class="table-wrap">
+                <table class="routing-table">
+                    <thead>
+                        <tr>
+                            <th>Pref</th>
+                            <th>Pool / Provider</th>
+                            <th>Waterfall Bucket</th>
+                            <th>Combined Usage vs Pace</th>
+                            <th>Resets / Expires</th>
+                            <th>Health &amp; Probe</th>
+                            <th>Weight</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="economy-table-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- Tab 2: Pools, Caps & Reserves Editor -->
+    <section class="routing-panel" id="panel-pools">
+        <div class="routing-card">
+            <div class="routing-card-header">
+                <div>
+                    <h2 class="routing-card-title">Pool Caps, Reserves, Pacing &amp; Weights</h2>
+                    <p class="routing-card-desc">Adjust monthly caps, safety reserves, tracked USD spend (e.g. Google AI Studio voucher), reset day, expiration date, pace slack, and weight.</p>
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table class="routing-table">
+                    <thead>
+                        <tr>
+                            <th>Pool</th>
+                            <th>Enabled</th>
+                            <th>Category</th>
+                            <th>Cap ($)</th>
+                            <th>Reserve ($)</th>
+                            <th>Spent ($)</th>
+                            <th>Reset Day</th>
+                            <th>Expires At (RFC3339 / YYYY-MM-DD)</th>
+                            <th>Pace Slack</th>
+                            <th>Weight</th>
+                            <th>Save</th>
+                        </tr>
+                    </thead>
+                    <tbody id="pools-editor-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- Tab 3: 3-Tier Model Catalog -->
+    <section class="routing-panel" id="panel-catalog">
+        <div class="routing-card">
+            <div class="routing-card-header">
+                <div>
+                    <h2 class="routing-card-title">Add or Update Route Model</h2>
+                    <p class="routing-card-desc">Configure per-tier candidates, harness routes, OpenRouter preset overlays, priority, and token pricing for cost tracking.</p>
+                </div>
+            </div>
+            <form id="model-form">
+                <input type="hidden" id="m-id" value="">
+                <div class="routing-form-grid">
+                    <div class="routing-field">
+                        <label for="m-tier">Tier</label>
+                        <select id="m-tier" class="routing-select">
+                            <option value="frontier">frontier</option>
+                            <option value="workhorse" selected>workhorse</option>
+                            <option value="lightweight">lightweight</option>
+                        </select>
+                    </div>
+                    <div class="routing-field">
+                        <label for="m-pool">Pool</label>
+                        <select id="m-pool" class="routing-select"></select>
+                    </div>
+                    <div class="routing-field">
+                        <label for="m-harness">Harness</label>
+                        <input id="m-harness" class="routing-input" placeholder="pi / cursor / antigravity / grok / claudeAgent / codex" value="pi" required>
+                    </div>
+                    <div class="routing-field">
+                        <label for="m-provider">Provider</label>
+                        <input id="m-provider" class="routing-input" placeholder="openrouter / nvidia / chutes / google-ai-studio" required>
+                    </div>
+                    <div class="routing-field">
+                        <label for="m-overlay">Overlay / Preset</label>
+                        <input id="m-overlay" class="routing-input" placeholder="@preset/code-nvidia">
+                    </div>
+                    <div class="routing-field">
+                        <label for="m-model">Model ID</label>
+                        <input id="m-model" class="routing-input" placeholder="nvidia/nemotron-3-ultra-550b-a55b:free" required>
+                    </div>
+                    <div class="routing-field">
+                        <label for="m-billing">Billing</label>
+                        <select id="m-billing" class="routing-select">
+                            <option value="free">free</option>
+                            <option value="byok" selected>byok</option>
+                            <option value="payg">payg</option>
+                        </select>
+                    </div>
+                    <div class="routing-field">
+                        <label for="m-priority">Priority</label>
+                        <input id="m-priority" type="number" class="routing-input" value="100">
+                    </div>
+                    <div class="routing-field">
+                        <label for="m-in-cost">Input $/1M</label>
+                        <input id="m-in-cost" type="number" step="0.01" class="routing-input" value="0">
+                    </div>
+                    <div class="routing-field">
+                        <label for="m-out-cost">Output $/1M</label>
+                        <input id="m-out-cost" type="number" step="0.01" class="routing-input" value="0">
+                    </div>
+                </div>
+                <div class="routing-form-grid">
+                    <div class="routing-field" style="grid-column: span 2;">
+                        <label for="m-desc">Description (shown to Jev selector)</label>
+                        <input id="m-desc" class="routing-input" placeholder="Short strengths/use-case description">
+                    </div>
+                    <div class="routing-field" style="justify-content:flex-end;">
+                        <label><input type="checkbox" id="m-override-pi"> Override pi preference</label>
+                        <label><input type="checkbox" id="m-enabled" checked> Enabled</label>
+                    </div>
+                    <div class="routing-field" style="justify-content:flex-end;flex-direction:row;align-items:flex-end;gap:8px;">
+                        <button type="submit" class="routing-btn routing-btn-primary" id="btn-save-model">Save Model</button>
+                        <button type="button" class="routing-btn" id="btn-reset-model">Clear</button>
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <div class="routing-card">
+            <div class="routing-card-header">
+                <div>
+                    <h2 class="routing-card-title">Configured Routes</h2>
+                    <p class="routing-card-desc">Filter and manage 3-tier routes across harnesses and pools.</p>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <select id="filter-tier" class="routing-select">
+                        <option value="">All Tiers</option>
+                        <option value="frontier">frontier</option>
+                        <option value="workhorse">workhorse</option>
+                        <option value="lightweight">lightweight</option>
+                    </select>
+                    <select id="filter-pool" class="routing-select">
+                        <option value="">All Pools</option>
+                    </select>
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table class="routing-table">
+                    <thead>
+                        <tr>
+                            <th>Tier</th>
+                            <th>Pool</th>
+                            <th>Harness / Provider</th>
+                            <th>Model &amp; Overlay</th>
+                            <th>Billing</th>
+                            <th>Prio</th>
+                            <th>Description</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="models-table-body"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="routing-card">
+            <div class="routing-card-header">
+                <div>
+                    <h2 class="routing-card-title">Excluded Models</h2>
+                    <p class="routing-card-desc">Models blocked from routing and exported in <code>excluded_models</code> for <code>or-iac import-catalog</code> (one per line).</p>
+                </div>
+                <button class="routing-btn routing-btn-primary" id="btn-save-excluded">Save Excluded List</button>
+            </div>
+            <textarea id="excluded-models-text" class="routing-textarea" rows="5"></textarea>
+        </div>
+    </section>
+
+    <!-- Tab 4: Probes, YAML & Feedback -->
+    <section class="routing-panel" id="panel-probes">
+        <div class="routing-card">
+            <div class="routing-card-header">
+                <div>
+                    <h2 class="routing-card-title">External Probe Credentials &amp; Google AI Studio Tracking</h2>
+                    <p class="routing-card-desc">Configure API credentials for Chutes and optional OpenRouter PAYG key, or a GCP project for Google AI Studio request monitoring.</p>
+                </div>
+                <button class="routing-btn routing-btn-primary" id="btn-save-settings">Save Credentials</button>
+            </div>
+            <div class="routing-form-grid">
+                <div class="routing-field">
+                    <label for="s-chutes-key">Chutes API Key <span id="s-chutes-status" class="text-muted"></span></label>
+                    <input id="s-chutes-key" type="password" class="routing-input" placeholder="Leave blank to keep existing key">
+                </div>
+                <div class="routing-field">
+                    <label for="s-or-payg-key">OpenRouter PAYG Key (optional) <span id="s-or-status" class="text-muted"></span></label>
+                    <input id="s-or-payg-key" type="password" class="routing-input" placeholder="Leave blank to track PAYG via feedback">
+                </div>
+                <div class="routing-field">
+                    <label for="s-gcp-project">Google Cloud Project (optional) <span id="s-gcp-status" class="text-muted"></span></label>
+                    <input id="s-gcp-project" class="routing-input" placeholder="my-gemini-project-id">
+                </div>
+            </div>
+        </div>
+
+        <div class="routing-card">
+            <div class="routing-card-header">
+                <div>
+                    <h2 class="routing-card-title">YAML Catalog Import / Export (<code>or-iac</code> compatible)</h2>
+                    <p class="routing-card-desc">Load current YAML or paste an updated catalog YAML to replace models and excluded models atomically.</p>
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <button class="routing-btn" id="btn-load-yaml">Load Current YAML</button>
+                    <button class="routing-btn routing-btn-primary" id="btn-import-yaml">Import YAML</button>
+                </div>
+            </div>
+            <textarea id="yaml-editor" class="routing-textarea" placeholder="Click 'Load Current YAML' or paste onwatch-catalog.yaml here..."></textarea>
+        </div>
+
+        <div class="routing-card">
+            <div class="routing-card-header">
+                <div>
+                    <h2 class="routing-card-title">Recent Caller Feedback Events</h2>
+                    <p class="routing-card-desc">Live 429, startup_failure, /bad, latency, and USD cost telemetry posted to <code>POST /api/route/feedback</code>.</p>
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table class="routing-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Pool</th>
+                            <th>Harness / Model</th>
+                            <th>Outcome</th>
+                            <th>TTFT / Latency</th>
+                            <th>Cost ($)</th>
+                            <th>Note / Issue</th>
+                        </tr>
+                    </thead>
+                    <tbody id="feedback-table-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="{{.BasePath}}/routing/assets/routing.js" defer></script>
+</body>
+</html>

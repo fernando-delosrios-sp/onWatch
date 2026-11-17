@@ -2864,3 +2864,9 @@ func (s *Store) HasActiveAlertOfType(provider, alertType string) (bool, error) {
 	}
 	return count > 0, nil
 }
+
+// DB returns the underlying SQLite connection handle for extension packages.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+

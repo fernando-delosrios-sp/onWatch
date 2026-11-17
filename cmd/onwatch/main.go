@@ -26,6 +26,7 @@ import (
 	"github.com/onllm-dev/onwatch/v2/internal/config"
 	"github.com/onllm-dev/onwatch/v2/internal/menubar"
 	"github.com/onllm-dev/onwatch/v2/internal/notify"
+	"github.com/onllm-dev/onwatch/v2/internal/routing"
 	"github.com/onllm-dev/onwatch/v2/internal/service"
 	"github.com/onllm-dev/onwatch/v2/internal/store"
 	"github.com/onllm-dev/onwatch/v2/internal/tracker"
@@ -735,6 +736,9 @@ func run() error {
 	// Note: "codex" must be checked before "status" because "codex profile status" contains "status"
 	if hasCommand("codex") {
 		return runCodexCommand()
+	}
+	if len(os.Args) > 1 && os.Args[1] == "route" {
+		return runRouteCommand()
 	}
 	if hasCommand("menubar") {
 		if hasFlag("--help") || hasFlag("-h") {
@@ -2183,6 +2187,15 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	routingSvc, routingErr := routing.NewService(db.DB(), logger, 5*time.Minute)
+	if routingErr != nil {
+		logger.Warn("Failed to initialize routing service", "error", routingErr)
+	} else {
+		server.RegisterRouting(routingSvc.Handler)
+		routingSvc.Start(ctx)
+		logger.Info("Model routing service initialized", "ui", "/routing")
+	}
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -3010,3 +3023,76 @@ func seedAlibabaDefaultAccount(db *store.Store, cfg *config.Config, logger *slog
 		return
 	}
 }
+
+func runRouteCommand() error {
+	args := os.Args[2:]
+	if len(args) == 0 || hasFlag("--help") || hasFlag("-h") {
+		fmt.Println("Usage:")
+		fmt.Println("  onwatch route export [output.yaml] [--db PATH]")
+		fmt.Println("  onwatch route import <input.yaml> [--db PATH]")
+		return nil
+	}
+
+	sub := args[0]
+	var positional []string
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--db" && i+1 < len(args) {
+			i++
+			continue
+		}
+		if strings.HasPrefix(args[i], "--db=") {
+			continue
+		}
+		positional = append(positional, args[i])
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	db, err := store.New(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open db %s: %w", cfg.DBPath, err)
+	}
+	defer db.Close()
+
+	svc, err := routing.NewService(db.DB(), slog.Default(), 5*time.Minute)
+	if err != nil {
+		return fmt.Errorf("init routing: %w", err)
+	}
+
+	switch sub {
+	case "export":
+		data, err := svc.Engine.ExportCatalogYAML(time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if len(positional) > 0 && positional[0] != "-" {
+			if err := os.WriteFile(positional[0], data, 0644); err != nil {
+				return err
+			}
+			fmt.Printf("Exported routing catalog to %s\n", positional[0])
+			return nil
+		}
+		fmt.Print(string(data))
+		return nil
+
+	case "import":
+		if len(positional) == 0 {
+			return fmt.Errorf("usage: onwatch route import <input.yaml>")
+		}
+		data, err := os.ReadFile(positional[0])
+		if err != nil {
+			return err
+		}
+		if err := svc.Engine.ImportCatalogYAML(data); err != nil {
+			return err
+		}
+		fmt.Printf("Imported routing catalog from %s\n", positional[0])
+		return nil
+
+	default:
+		return fmt.Errorf("unknown route subcommand %q (expected export or import)", sub)
+	}
+}
+

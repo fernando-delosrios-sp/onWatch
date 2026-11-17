@@ -22,12 +22,19 @@ var templatesFS embed.FS
 //go:embed all:static/*
 var staticFS embed.FS
 
+// RoutingRegistrar registers routing API and UI endpoints on the web server mux.
+type RoutingRegistrar interface {
+	RegisterRoutes(mux *http.ServeMux, basePath string)
+}
+
 // Server wraps an HTTP server with graceful shutdown capabilities
 type Server struct {
 	httpServer *http.Server
 	handler    *Handler
 	logger     *slog.Logger
 	port       int
+	mux        *http.ServeMux
+	basePath   string
 }
 
 // NewServer creates a new Server instance.
@@ -184,10 +191,20 @@ func NewServer(port int, handler *Handler, logger *slog.Logger, username, passwo
 			WriteTimeout:      60 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
-		handler: handler,
-		logger:  logger,
-		port:    port,
+		handler:  handler,
+		logger:   logger,
+		port:     port,
+		mux:      mux,
+		basePath: bp,
 	}
+}
+
+// RegisterRouting attaches routing API and UI routes onto the server's mux.
+func (s *Server) RegisterRouting(r RoutingRegistrar) {
+	if s == nil || s.mux == nil || r == nil {
+		return
+	}
+	r.RegisterRoutes(s.mux, s.basePath)
 }
 
 // contentTypeHandler wraps a handler and sets proper Content-Type and Cache-Control headers
@@ -266,7 +283,7 @@ func csrfMiddleware(next http.Handler, basePath string) http.Handler {
 			// Exempt form-based auth endpoints from CSRF header check.
 			// These are protected by session cookies with SameSite=Strict instead.
 			path := r.URL.Path
-			if path != loginPath && path != logoutPath {
+			if path != loginPath && path != logoutPath && !(isLocalRoutingPublicPath(path, basePath) && isLoopbackRequest(r)) {
 				if r.Header.Get("X-Requested-With") == "" {
 					http.Error(w, "missing required header", http.StatusForbidden)
 					return
