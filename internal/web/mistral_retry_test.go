@@ -47,7 +47,7 @@ func TestMistralRetryHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s := NewServer(9211, h, slog.Default(), "admin", hash, "", bp, "", nil)
+			s := NewServer(9211, h, slog.Default(), "admin", hash, "", bp, "", nil, false)
 			// Base-path deployments sit behind a proxy, so the tray path is
 			// never public there.
 			localTray := func(want int) int {

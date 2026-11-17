@@ -2174,7 +2174,10 @@ func run() error {
 			"user_header", cfg.TrustedUserHeader)
 	}
 
-	server := web.NewServer(cfg.Port, handler, logger, cfg.AdminUser, cfg.AdminPassHash, cfg.Host, cfg.BasePath, cfg.MetricsToken, trustedProxy)
+	server := web.NewServer(cfg.Port, handler, logger, cfg.AdminUser, cfg.AdminPassHash, cfg.Host, cfg.BasePath, cfg.MetricsToken, trustedProxy, cfg.AuthLoopbackOpen)
+	if cfg.AuthLoopbackOpen {
+		logger.Warn("ONWATCH_LOOPBACK_OPEN is enabled - dashboard login is skipped for direct localhost requests")
+	}
 
 	// Setup signal handling
 	ctx, cancel := context.WithCancel(context.Background())

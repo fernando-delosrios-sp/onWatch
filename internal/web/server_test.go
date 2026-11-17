@@ -36,7 +36,7 @@ func TestServer_StartsOnPort(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := NewHandler(nil, nil, logger, nil, nil)
 	passHash, _ := HashPassword("test")
-	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil)
+	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil, false)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -71,7 +71,7 @@ func TestServer_ServesHTML(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := NewHandler(nil, nil, logger, nil, nil)
 	passHash, _ := HashPassword("test")
-	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil)
+	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil, false)
 
 	// Start server
 	go server.Start()
@@ -115,7 +115,7 @@ func TestServer_ServesStaticCSS(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := NewHandler(nil, nil, logger, nil, nil)
 	passHash, _ := HashPassword("test")
-	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil)
+	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil, false)
 
 	go server.Start()
 	time.Sleep(100 * time.Millisecond)
@@ -156,7 +156,7 @@ func TestServer_ServesStaticJS(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := NewHandler(nil, nil, logger, nil, nil)
 	passHash, _ := HashPassword("test")
-	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil)
+	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil, false)
 
 	go server.Start()
 	time.Sleep(100 * time.Millisecond)
@@ -197,7 +197,7 @@ func TestServer_GracefulShutdown(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := NewHandler(nil, nil, logger, nil, nil)
 	passHash, _ := HashPassword("test")
-	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil)
+	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil, false)
 
 	go server.Start()
 	time.Sleep(100 * time.Millisecond)
@@ -233,7 +233,7 @@ func TestServer_EmbeddedAssets(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := NewHandler(nil, nil, logger, nil, nil)
 	passHash, _ := HashPassword("test")
-	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil)
+	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil, false)
 
 	go server.Start()
 	time.Sleep(100 * time.Millisecond)
@@ -308,7 +308,7 @@ func TestServer_RequiresCSRFHeader_OnPost(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := NewHandler(nil, nil, logger, nil, nil)
 	// No auth to test CSRF independently
-	server := NewServer(freePort(t), handler, logger, "", "", "", "", "", nil)
+	server := NewServer(freePort(t), handler, logger, "", "", "", "", "", nil, false)
 
 	go server.Start()
 	time.Sleep(100 * time.Millisecond)
@@ -373,7 +373,7 @@ func TestServer_AllowsGet_WithoutCSRFHeader(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := NewHandler(nil, nil, logger, nil, nil)
 	passHash, _ := HashPassword("test")
-	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil)
+	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "", nil, false)
 
 	go server.Start()
 	time.Sleep(100 * time.Millisecond)
@@ -437,7 +437,7 @@ func TestServer_MetricsUsesBearerAuthWithoutDashboardRedirect(t *testing.T) {
 	cfg := &config.Config{PollInterval: time.Minute}
 	handler := NewHandler(s, nil, logger, nil, cfg)
 	passHash, _ := HashPassword("test")
-	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "metrics-secret", nil)
+	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "metrics-secret", nil, false)
 
 	go server.Start()
 	time.Sleep(100 * time.Millisecond)
@@ -488,7 +488,7 @@ func TestServer_MetricsRejectsMissingOrInvalidBearerToken(t *testing.T) {
 	cfg := &config.Config{PollInterval: time.Minute}
 	handler := NewHandler(s, nil, logger, nil, cfg)
 	passHash, _ := HashPassword("test")
-	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "metrics-secret", nil)
+	server := NewServer(freePort(t), handler, logger, "admin", passHash, "", "", "metrics-secret", nil, false)
 
 	go server.Start()
 	time.Sleep(100 * time.Millisecond)

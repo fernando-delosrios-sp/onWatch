@@ -36,7 +36,7 @@ type Server struct {
 // metricsToken is the bearer token for /metrics endpoint (can be empty to disable auth).
 // trustedProxy optionally lets authenticated reverse-proxy requests bypass the
 // local login (ONWATCH_AUTH_MODE=trusted_proxy); pass nil for local auth only.
-func NewServer(port int, handler *Handler, logger *slog.Logger, username, passwordHash, host, basePath, metricsToken string, trustedProxy *TrustedProxyAuth) *Server {
+func NewServer(port int, handler *Handler, logger *slog.Logger, username, passwordHash, host, basePath, metricsToken string, trustedProxy *TrustedProxyAuth, loopbackOpen bool) *Server {
 	if port == 0 {
 		port = 9211 // default port
 	}
@@ -169,7 +169,7 @@ func NewServer(port int, handler *Handler, logger *slog.Logger, username, passwo
 	if username != "" && passwordHash != "" {
 		sessions := NewSessionStore(username, passwordHash, handler.store)
 		handler.sessions = sessions
-		finalHandler = sessionAuthMiddlewareWithTrustedProxy(sessions, bp, trustedProxy, logger)(mux)
+		finalHandler = sessionAuthMiddlewareWithTrustedProxy(sessions, bp, trustedProxy, loopbackOpen, logger)(mux)
 	}
 	// Apply security headers and gzip compression (outermost)
 	finalHandler = securityHeadersMiddleware(gzipHandler(finalHandler), bp)

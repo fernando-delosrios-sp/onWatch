@@ -94,7 +94,7 @@ func trustedProxyTestServer(t *testing.T, tp *TrustedProxyAuth) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
-	return sessionAuthMiddlewareWithTrustedProxy(sessions, "", tp)(okHandler)
+	return sessionAuthMiddlewareWithTrustedProxy(sessions, "", tp, false)(okHandler)
 }
 
 func TestSessionAuth_TrustedProxyBypassesLogin(t *testing.T) {

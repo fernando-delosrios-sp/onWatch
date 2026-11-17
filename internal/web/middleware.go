@@ -230,10 +230,10 @@ func SessionAuthMiddleware(sessions *SessionStore, logger ...*slog.Logger) func(
 }
 
 func sessionAuthMiddlewareWithBasePath(sessions *SessionStore, basePath string, logger ...*slog.Logger) func(http.Handler) http.Handler {
-	return sessionAuthMiddlewareWithTrustedProxy(sessions, basePath, nil, logger...)
+	return sessionAuthMiddlewareWithTrustedProxy(sessions, basePath, nil, false, logger...)
 }
 
-func sessionAuthMiddlewareWithTrustedProxy(sessions *SessionStore, basePath string, trustedProxy *TrustedProxyAuth, logger ...*slog.Logger) func(http.Handler) http.Handler {
+func sessionAuthMiddlewareWithTrustedProxy(sessions *SessionStore, basePath string, trustedProxy *TrustedProxyAuth, loopbackOpen bool, logger ...*slog.Logger) func(http.Handler) http.Handler {
 	var log *slog.Logger
 	if len(logger) > 0 && logger[0] != nil {
 		log = logger[0]
@@ -256,6 +256,12 @@ func sessionAuthMiddlewareWithTrustedProxy(sessions *SessionStore, basePath stri
 
 			// Local tray surface is intentionally public for localhost requests.
 			if isLocalMenubarPublicPath(path) && isLoopbackRequest(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Optional: entire dashboard open on direct loopback (ONWATCH_LOOPBACK_OPEN).
+			if loopbackOpen && isLoopbackRequest(r) {
 				next.ServeHTTP(w, r)
 				return
 			}

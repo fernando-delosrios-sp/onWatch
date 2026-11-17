@@ -172,6 +172,7 @@ type Config struct {
 	SessionIdleTimeout time.Duration // ONWATCH_SESSION_IDLE_TIMEOUT (seconds → Duration)
 	BasePath           string        // ONWATCH_BASE_PATH (subdirectory hosting, e.g. "/onwatch")
 	AuthMode           string        // ONWATCH_AUTH_MODE: "local" (default) or "trusted_proxy"
+	AuthLoopbackOpen   bool          // ONWATCH_LOOPBACK_OPEN: skip dashboard login for direct loopback requests
 	TrustedProxyCIDRs  []string      // ONWATCH_TRUSTED_PROXY_CIDRS (comma-separated CIDRs or IPs)
 	TrustedUserHeader  string        // ONWATCH_TRUSTED_USER_HEADER (default: X-Forwarded-User)
 	DebugMode          bool          // --debug flag (foreground mode)
@@ -712,6 +713,9 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 
 	// Dashboard auth mode (local login vs trusted reverse proxy)
 	cfg.AuthMode = strings.ToLower(strings.TrimSpace(os.Getenv("ONWATCH_AUTH_MODE")))
+	if env := strings.ToLower(strings.TrimSpace(os.Getenv("ONWATCH_LOOPBACK_OPEN"))); env == "true" || env == "1" {
+		cfg.AuthLoopbackOpen = true
+	}
 	if env := strings.TrimSpace(os.Getenv("ONWATCH_TRUSTED_PROXY_CIDRS")); env != "" {
 		for _, part := range strings.Split(env, ",") {
 			if p := strings.TrimSpace(part); p != "" {

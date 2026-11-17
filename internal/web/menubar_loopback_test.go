@@ -39,6 +39,27 @@ func TestIsLoopbackRequestRejectsProxiedRequests(t *testing.T) {
 // A reverse proxy on the same host connects from 127.0.0.1, so the public
 // tray paths must still require auth when the request was forwarded. Base-path
 // deployments sit behind a proxy by design and never expose them.
+func TestSessionAuthMiddleware_LoopbackOpenSkipsLogin(t *testing.T) {
+	sessions := NewSessionStore("admin", legacyHashPassword("secret"), nil)
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler := sessionAuthMiddlewareWithTrustedProxy(sessions, "", nil, true)(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("loopback open: expected 200, got %d", rr.Code)
+	}
+
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusFound && rr.Code != http.StatusUnauthorized {
+		t.Fatalf("proxied loopback: expected redirect or 401, got %d", rr.Code)
+	}
+}
+
 func TestMenubarPublicPathsRequireAuthBehindLocalProxy(t *testing.T) {
 	sessions := NewSessionStore("admin", "unused", nil)
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
