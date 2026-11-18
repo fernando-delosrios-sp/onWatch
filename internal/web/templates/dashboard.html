@@ -140,6 +140,12 @@
         {{else if eq .CurrentProvider "deepseek"}}
         <!-- DeepSeek quota cards (dynamically populated by JS) -->
         <div class="quota-grid" id="quota-grid-deepseek" data-provider="deepseek"></div>
+        {{else if eq .CurrentProvider "chutes"}}
+        <div class="quota-grid" id="quota-grid-chutes" data-provider="chutes"></div>
+        {{else if eq .CurrentProvider "nvidia"}}
+        <div class="quota-grid" id="quota-grid-nvidia" data-provider="nvidia"></div>
+        {{else if eq .CurrentProvider "googleaistudio"}}
+        <div class="quota-grid" id="quota-grid-googleaistudio" data-provider="googleaistudio"></div>
         {{else if eq .CurrentProvider "gemini"}}
         <!-- Gemini quota cards (dynamically populated by JS) -->
         <div class="quota-grid" id="quota-grid-gemini" data-provider="gemini"></div>
@@ -435,7 +441,7 @@
         </section>
         {{end}}
 
-        {{if ne .CurrentProvider "both"}}
+        {{if and (ne .CurrentProvider "both") (ne .CurrentProvider "nvidia") (ne .CurrentProvider "googleaistudio") (ne .CurrentProvider "chutes")}}
         <section class="chart-section">
             <header class="section-header">
                 <h3 class="section-title">
@@ -593,6 +599,18 @@
                             <th data-sort-key="tool" role="button" tabindex="0">Snapshots <span class="sort-arrow"></span></th>
                             {{else if eq .CurrentProvider "openrouter"}}
                             <th data-sort-key="sub" role="button" tabindex="0">Credits Used <span class="sort-arrow"></span></th>
+                            <th data-sort-key="search" role="button" tabindex="0">Session Δ <span class="sort-arrow"></span></th>
+                            <th data-sort-key="tool" role="button" tabindex="0">Snapshots <span class="sort-arrow"></span></th>
+                            {{else if eq .CurrentProvider "chutes"}}
+                            <th data-sort-key="sub" role="button" tabindex="0">Credits Used <span class="sort-arrow"></span></th>
+                            <th data-sort-key="search" role="button" tabindex="0">Session Δ <span class="sort-arrow"></span></th>
+                            <th data-sort-key="tool" role="button" tabindex="0">Snapshots <span class="sort-arrow"></span></th>
+                            {{else if eq .CurrentProvider "nvidia"}}
+                            <th data-sort-key="sub" role="button" tabindex="0">Requests <span class="sort-arrow"></span></th>
+                            <th data-sort-key="search" role="button" tabindex="0">Session Δ <span class="sort-arrow"></span></th>
+                            <th data-sort-key="tool" role="button" tabindex="0">Snapshots <span class="sort-arrow"></span></th>
+                            {{else if eq .CurrentProvider "googleaistudio"}}
+                            <th data-sort-key="sub" role="button" tabindex="0">Requests (24h) <span class="sort-arrow"></span></th>
                             <th data-sort-key="search" role="button" tabindex="0">Session Δ <span class="sort-arrow"></span></th>
                             <th data-sort-key="tool" role="button" tabindex="0">Snapshots <span class="sort-arrow"></span></th>
                             {{else if eq .CurrentProvider "moonshot"}}

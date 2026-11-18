@@ -129,7 +129,7 @@ func (h *Handler) serveAsset(w http.ResponseWriter, name, contentType string) {
 	_, _ = w.Write(data)
 }
 
-// Route handles GET /api/route?harnesses=...&tier=...&pool=...&exclude=...
+// Route handles GET /api/route?harnesses=...&tier=...&pool=...&exclude=...&exclude_free=true
 func (h *Handler) Route(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -149,11 +149,13 @@ func (h *Handler) Route(w http.ResponseWriter, r *http.Request) {
 		}
 		tier = t
 	}
+	excludeFree := parseBoolQueryParam(q.Get("exclude_free")) || parseBoolQueryParam(q.Get("excludeFree"))
 	opts := RouteOptions{
-		Harnesses:  harnesses,
-		Tier:       tier,
-		StickyPool: strings.TrimSpace(q.Get("pool")),
-		Exclude:    q["exclude"],
+		Harnesses:   harnesses,
+		Tier:        tier,
+		StickyPool:  strings.TrimSpace(q.Get("pool")),
+		Exclude:     q["exclude"],
+		ExcludeFree: excludeFree,
 	}
 	resp, err := h.engine.SelectRouteWithOptions(r.Context(), opts, time.Now().UTC())
 	if err != nil {
@@ -161,6 +163,15 @@ func (h *Handler) Route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func parseBoolQueryParam(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // Feedback handles POST /api/route/feedback
@@ -348,6 +359,19 @@ func (h *Handler) PoolsSubroute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && (parts[1] == "reset" || parts[1] == "reset-cycle") {
+		if r.Method != http.MethodPost {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if err := h.store.ResetPoolCycle(r.Context(), poolID); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "message": "pool cycle reset"})
+		return
+	}
+
 	if len(parts) != 1 || r.Method != http.MethodPut {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -359,6 +383,7 @@ func (h *Handler) PoolsSubroute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.ID = poolID
+	p.Category = NormalizeCategory(p.Category)
 	if existing, err := h.store.GetPool(poolID); err == nil && existing != nil {
 		if p.DisplayName == "" {
 			p.DisplayName = existing.DisplayName
@@ -368,6 +393,16 @@ func (h *Handler) PoolsSubroute(w http.ResponseWriter, r *http.Request) {
 		}
 		if p.CycleStart == nil {
 			p.CycleStart = existing.CycleStart
+		}
+		if p.ResetCycle == "" {
+			p.ResetCycle = existing.ResetCycle
+		}
+		if p.InnerWindowHours == 0 && existing.InnerWindowHours > 0 {
+			p.InnerWindowHours = existing.InnerWindowHours
+		}
+		// Built-in integrated pools have locked categories
+		if existing.IsBuiltinPool() {
+			p.Category = existing.Category
 		}
 	}
 	p.UpdatedAt = time.Now().UTC()

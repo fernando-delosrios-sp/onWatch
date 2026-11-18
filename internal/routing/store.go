@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -38,12 +39,17 @@ func (s *Store) migrate() error {
 			reserve_usd REAL NOT NULL DEFAULT 0,
 			spent_usd REAL NOT NULL DEFAULT 0,
 			reset_day INTEGER NOT NULL DEFAULT 0,
+			reset_cycle TEXT NOT NULL DEFAULT 'monthly',
+			inner_window_hours INTEGER NOT NULL DEFAULT 0,
 			expires_at TEXT,
 			window_hours INTEGER NOT NULL DEFAULT 0,
 			pace_slack REAL NOT NULL DEFAULT 0.10,
 			weight INTEGER NOT NULL DEFAULT 100,
 			probe_source TEXT NOT NULL DEFAULT 'manual',
 			cycle_start TEXT,
+			routing_provider TEXT NOT NULL DEFAULT '',
+			input_cost_per_1m REAL NOT NULL DEFAULT 0,
+			output_cost_per_1m REAL NOT NULL DEFAULT 0,
 			notes TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL
 		);
@@ -133,6 +139,76 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("routing migrate: %w", err)
 	}
+
+	// Migrate nvidia-free models from @preset/code-nvidia overlay to exact openrouter models
+	_, _ = s.db.Exec(`UPDATE routing_models SET overlay = '', provider = 'openrouter' WHERE pool_id = 'nvidia-free' AND overlay = '@preset/code-nvidia'`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET notes = '$0 free pool via OpenRouter (health-gated)' WHERE id = 'nvidia-free' AND notes LIKE '%@preset/code-nvidia%'`)
+
+	// Ensure new columns exist on routing_pools
+	_, _ = s.db.Exec(`ALTER TABLE routing_pools ADD COLUMN reset_cycle TEXT NOT NULL DEFAULT 'monthly'`)
+	_, _ = s.db.Exec(`ALTER TABLE routing_pools ADD COLUMN inner_window_hours INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE routing_pools ADD COLUMN routing_provider TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE routing_pools ADD COLUMN input_cost_per_1m REAL NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE routing_pools ADD COLUMN output_cost_per_1m REAL NOT NULL DEFAULT 0`)
+
+	// Strip legacy preset overlays from models
+	_, _ = s.db.Exec(`UPDATE routing_models SET overlay = '' WHERE overlay LIKE '@preset/%'`)
+
+	// Migrate categories: monthly_cooldown -> subscription, monthly_no_cooldown -> allowance
+	_, _ = s.db.Exec(`UPDATE routing_pools SET category = 'subscription' WHERE category = 'monthly_cooldown'`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET category = 'allowance' WHERE category = 'monthly_no_cooldown'`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET reset_cycle = 'weekly', inner_window_hours = 5 WHERE id IN ('antigravity-3p', 'antigravity-gemini', 'claude', 'codex')`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET reset_cycle = 'weekly', window_hours = 168 WHERE id = 'xai'`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET reset_cycle = 'monthly' WHERE id IN ('cursor', 'google-ai-studio', 'chutes', 'openrouter-payg')`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET display_name = 'Chutes' WHERE id = 'chutes'`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET display_name = 'OpenRouter' WHERE id = 'openrouter-payg'`)
+
+	// Ensure OpenRouter-routed pools and default integration costs
+	_, _ = s.db.Exec(`UPDATE routing_pools SET routing_provider = 'openrouter' WHERE id IN ('nvidia-free', 'google-ai-studio', 'chutes', 'openrouter-payg', 'xai') AND (routing_provider = '' OR routing_provider IS NULL)`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET input_cost_per_1m = 0.30, output_cost_per_1m = 2.50 WHERE id = 'google-ai-studio' AND input_cost_per_1m = 0 AND output_cost_per_1m = 0`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET input_cost_per_1m = 0.20, output_cost_per_1m = 0.60 WHERE id = 'openrouter-payg' AND input_cost_per_1m = 0 AND output_cost_per_1m = 0`)
+	// Drop legacy seeded $5 PAYG caps so actual credit balance governs unless user sets a cap
+	_, _ = s.db.Exec(`UPDATE routing_pools SET cap_usd = 0 WHERE category = 'payg' AND notes LIKE '%$5%'`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET notes = 'PAYG balance on t3-code-main' WHERE id = 'openrouter-payg' AND notes LIKE '%$5/mo%'`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET notes = 'Chutes PAYG balance with prompt caching' WHERE id = 'chutes' AND notes LIKE '%$5%'`)
+
+	// Migrate antigravity pools: antigravity-argon (Argon) and antigravity-gemini (Hydrogen + Flash)
+	var poolCount int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM routing_pools`).Scan(&poolCount)
+	if poolCount > 0 {
+		_, _ = s.db.Exec(`
+			INSERT INTO routing_pools (
+				id, display_name, category, enabled, cap_usd, reserve_usd, spent_usd,
+				reset_day, reset_cycle, inner_window_hours, window_hours, pace_slack, weight, probe_source, notes, updated_at
+			) VALUES (
+				'antigravity-argon', 'Antigravity Argon', 'subscription', 1, 0, 0, 0,
+				0, 'weekly', 0, 168, 0.10, 98, 'antigravity_argon', 'Antigravity Gemini 4 Argon weekly window', datetime('now')
+			) ON CONFLICT(id) DO UPDATE SET
+				display_name = excluded.display_name,
+				reset_cycle = excluded.reset_cycle,
+				window_hours = excluded.window_hours,
+				probe_source = excluded.probe_source
+		`)
+		_, _ = s.db.Exec(`
+			INSERT OR IGNORE INTO routing_pool_health (
+				pool_id, consecutive_errors, avg_ttft_ms, error_rate, health_score, last_reason, updated_at
+			) VALUES ('antigravity-argon', 0, 0, 0, 100, '', datetime('now'))
+		`)
+		_, _ = s.db.Exec(`UPDATE routing_pools SET notes = 'Antigravity Gemini (Hydrogen & Flash) 5h & 7d windows' WHERE id = 'antigravity-gemini'`)
+		_, _ = s.db.Exec(`UPDATE routing_models SET pool_id = 'antigravity-argon' WHERE pool_id = 'antigravity-gemini' AND model_id = 'gemini-4-argon'`)
+		_, _ = s.db.Exec(`UPDATE routing_models SET pool_id = 'antigravity-gemini' WHERE pool_id = 'antigravity-flash'`)
+		_, _ = s.db.Exec(`DELETE FROM routing_pools WHERE id = 'antigravity-flash'`)
+		_, _ = s.db.Exec(`DELETE FROM routing_pool_health WHERE pool_id = 'antigravity-flash'`)
+	}
+
+	// Clean up invalid pi harness routes on non-OpenRouter pools (antigravity, claude, codex), enforce openrouter provider on pi, and prune deprecated/expensive models
+	_, _ = s.db.Exec(`DELETE FROM routing_models WHERE harness = 'pi' AND (pool_id LIKE 'antigravity-%' OR pool_id IN ('claude', 'codex'))`)
+	_, _ = s.db.Exec(`UPDATE routing_models SET provider = 'openrouter' WHERE harness = 'pi'`)
+	_, _ = s.db.Exec(`UPDATE routing_pools SET routing_provider = 'openrouter' WHERE id = 'xai'`)
+	_, _ = s.db.Exec(`DELETE FROM routing_models WHERE tier = 'frontier' AND pool_id = 'xai' AND model_id LIKE '%grok-4.6%'`)
+	_, _ = s.db.Exec(`DELETE FROM routing_models WHERE tier = 'frontier' AND pool_id = 'openrouter-payg' AND model_id LIKE '%sol-pro%'`)
+	_, _ = s.db.Exec(`DELETE FROM routing_models WHERE tier = 'workhorse' AND pool_id = 'nvidia-free'`)
+
 	return nil
 }
 
@@ -179,6 +255,14 @@ func (s *Store) seedDefaultsIfEmpty() error {
 }
 
 func upsertPoolTx(tx *sql.Tx, p Pool) error {
+	p.Category = NormalizeCategory(p.Category)
+	if p.ResetCycle == "" {
+		if p.Category == CategorySubscription {
+			p.ResetCycle = "weekly"
+		} else {
+			p.ResetCycle = "monthly"
+		}
+	}
 	var expiresAt, cycleStart interface{}
 	if p.ExpiresAt != nil {
 		expiresAt = p.ExpiresAt.UTC().Format(time.RFC3339Nano)
@@ -193,9 +277,9 @@ func upsertPoolTx(tx *sql.Tx, p Pool) error {
 	_, err := tx.Exec(`
 		INSERT INTO routing_pools (
 			id, display_name, category, enabled, cap_usd, reserve_usd, spent_usd,
-			reset_day, expires_at, window_hours, pace_slack, weight, probe_source,
-			cycle_start, notes, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			reset_day, reset_cycle, inner_window_hours, expires_at, window_hours, pace_slack, weight, probe_source,
+			cycle_start, routing_provider, input_cost_per_1m, output_cost_per_1m, notes, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			display_name = excluded.display_name,
 			category = excluded.category,
@@ -204,19 +288,26 @@ func upsertPoolTx(tx *sql.Tx, p Pool) error {
 			reserve_usd = excluded.reserve_usd,
 			spent_usd = excluded.spent_usd,
 			reset_day = excluded.reset_day,
+			reset_cycle = excluded.reset_cycle,
+			inner_window_hours = excluded.inner_window_hours,
 			expires_at = excluded.expires_at,
 			window_hours = excluded.window_hours,
 			pace_slack = excluded.pace_slack,
 			weight = excluded.weight,
 			probe_source = excluded.probe_source,
 			cycle_start = excluded.cycle_start,
+			routing_provider = excluded.routing_provider,
+			input_cost_per_1m = excluded.input_cost_per_1m,
+			output_cost_per_1m = excluded.output_cost_per_1m,
 			notes = excluded.notes,
 			updated_at = excluded.updated_at
 	`,
 		p.ID, p.DisplayName, string(p.Category), enabled,
 		p.CapUSD, p.ReserveUSD, p.SpentUSD, p.ResetDay,
+		p.ResetCycle, p.InnerWindowHours,
 		expiresAt, p.WindowHours, p.PaceSlack, p.Weight, p.ProbeSource,
-		cycleStart, p.Notes, p.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		cycleStart, p.RoutingProvider, p.InputCostPer1M, p.OutputCostPer1M,
+		p.Notes, p.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	return err
 }
@@ -231,6 +322,47 @@ func ensureHealthTx(tx *sql.Tx, poolID string, now time.Time) error {
 }
 
 func insertModelTx(tx *sql.Tx, m RouteModel) error {
+	var cat, routingProvider, probeSource string
+	var poolInCost, poolOutCost float64
+	_ = tx.QueryRow(`SELECT category, COALESCE(routing_provider, ''), COALESCE(input_cost_per_1m, 0), COALESCE(output_cost_per_1m, 0), COALESCE(probe_source, '') FROM routing_pools WHERE id = ?`, m.PoolID).Scan(&cat, &routingProvider, &poolInCost, &poolOutCost, &probeSource)
+
+	if m.Billing == "" {
+		switch NormalizeCategory(PoolCategory(cat)) {
+		case CategoryFree:
+			m.Billing = "free"
+		case CategoryPAYG:
+			m.Billing = "payg"
+		default:
+			m.Billing = "byok"
+		}
+	}
+	if m.InputCostPer1M == 0 && m.OutputCostPer1M == 0 {
+		m.InputCostPer1M = poolInCost
+		m.OutputCostPer1M = poolOutCost
+	}
+	if routingProvider == "openrouter" {
+		m.ModelID = GenerateOpenRouterModel(m.Provider, m.ModelID)
+		if m.Provider == "" {
+			m.Provider = "openrouter"
+		}
+	} else if m.Provider == "" {
+		if strings.HasPrefix(m.PoolID, "antigravity") {
+			m.Provider = "antigravity"
+		} else if strings.HasPrefix(m.PoolID, "cursor") {
+			m.Provider = "cursor"
+		} else if strings.HasPrefix(m.PoolID, "xai") {
+			m.Provider = "xai"
+		} else if probeSource != "" {
+			parts := strings.Split(probeSource, "_")
+			m.Provider = parts[0]
+		} else {
+			m.Provider = m.PoolID
+		}
+	}
+	if strings.HasPrefix(m.Overlay, "@preset/") {
+		m.Overlay = ""
+	}
+
 	overridePi := 0
 	if m.OverridePiPreference {
 		overridePi = 1
@@ -266,8 +398,10 @@ func insertModelTx(tx *sql.Tx, m RouteModel) error {
 func (s *Store) ListPools() ([]Pool, error) {
 	rows, err := s.db.Query(`
 		SELECT id, display_name, category, enabled, cap_usd, reserve_usd, spent_usd,
-		       reset_day, expires_at, window_hours, pace_slack, weight, probe_source,
-		       cycle_start, notes, updated_at
+		       reset_day, COALESCE(reset_cycle, 'monthly'), COALESCE(inner_window_hours, 0),
+		       expires_at, window_hours, pace_slack, weight, probe_source,
+		       cycle_start, COALESCE(routing_provider, ''), COALESCE(input_cost_per_1m, 0), COALESCE(output_cost_per_1m, 0),
+		       notes, updated_at
 		FROM routing_pools
 		ORDER BY id ASC
 	`)
@@ -279,21 +413,29 @@ func (s *Store) ListPools() ([]Pool, error) {
 	var out []Pool
 	for rows.Next() {
 		var p Pool
-		var cat, updatedAt string
-		var enabled int
+		var cat, resetCycle, updatedAt, routingProvider string
+		var enabled, innerWH int
+		var inCost, outCost float64
 		var expiresAt, cycleStart sql.NullString
 		if err := rows.Scan(
 			&p.ID, &p.DisplayName, &cat, &enabled,
 			&p.CapUSD, &p.ReserveUSD, &p.SpentUSD, &p.ResetDay,
+			&resetCycle, &innerWH,
 			&expiresAt, &p.WindowHours, &p.PaceSlack, &p.Weight, &p.ProbeSource,
-			&cycleStart, &p.Notes, &updatedAt,
+			&cycleStart, &routingProvider, &inCost, &outCost,
+			&p.Notes, &updatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan pool: %w", err)
 		}
-		p.Category = PoolCategory(cat)
+		p.Category = NormalizeCategory(PoolCategory(cat))
 		p.Enabled = enabled != 0
+		p.ResetCycle = resetCycle
+		p.InnerWindowHours = innerWH
 		p.ExpiresAt = parseNullTime(expiresAt)
 		p.CycleStart = parseNullTime(cycleStart)
+		p.RoutingProvider = routingProvider
+		p.InputCostPer1M = inCost
+		p.OutputCostPer1M = outCost
 		p.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 		out = append(out, p)
 	}
@@ -303,19 +445,24 @@ func (s *Store) ListPools() ([]Pool, error) {
 // GetPool returns a single pool by ID.
 func (s *Store) GetPool(id string) (*Pool, error) {
 	var p Pool
-	var cat, updatedAt string
-	var enabled int
+	var cat, resetCycle, updatedAt, routingProvider string
+	var enabled, innerWH int
+	var inCost, outCost float64
 	var expiresAt, cycleStart sql.NullString
 	err := s.db.QueryRow(`
 		SELECT id, display_name, category, enabled, cap_usd, reserve_usd, spent_usd,
-		       reset_day, expires_at, window_hours, pace_slack, weight, probe_source,
-		       cycle_start, notes, updated_at
+		       reset_day, COALESCE(reset_cycle, 'monthly'), COALESCE(inner_window_hours, 0),
+		       expires_at, window_hours, pace_slack, weight, probe_source,
+		       cycle_start, COALESCE(routing_provider, ''), COALESCE(input_cost_per_1m, 0), COALESCE(output_cost_per_1m, 0),
+		       notes, updated_at
 		FROM routing_pools WHERE id = ?
 	`, id).Scan(
 		&p.ID, &p.DisplayName, &cat, &enabled,
 		&p.CapUSD, &p.ReserveUSD, &p.SpentUSD, &p.ResetDay,
+		&resetCycle, &innerWH,
 		&expiresAt, &p.WindowHours, &p.PaceSlack, &p.Weight, &p.ProbeSource,
-		&cycleStart, &p.Notes, &updatedAt,
+		&cycleStart, &routingProvider, &inCost, &outCost,
+		&p.Notes, &updatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -323,12 +470,36 @@ func (s *Store) GetPool(id string) (*Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get pool %s: %w", id, err)
 	}
-	p.Category = PoolCategory(cat)
+	p.Category = NormalizeCategory(PoolCategory(cat))
 	p.Enabled = enabled != 0
+	p.ResetCycle = resetCycle
+	p.InnerWindowHours = innerWH
 	p.ExpiresAt = parseNullTime(expiresAt)
 	p.CycleStart = parseNullTime(cycleStart)
+	p.RoutingProvider = routingProvider
+	p.InputCostPer1M = inCost
+	p.OutputCostPer1M = outCost
 	p.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	return &p, nil
+}
+
+// ResetPoolCycle resets cycle_start and spent_usd for a pool.
+func (s *Store) ResetPoolCycle(ctx context.Context, poolID string) error {
+	now := time.Now().UTC()
+	nowStr := now.Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE routing_pools
+		SET spent_usd = 0, cycle_start = ?, updated_at = ?
+		WHERE id = ?
+	`, nowStr, nowStr, poolID)
+	if err != nil {
+		return fmt.Errorf("reset pool cycle %s: %w", poolID, err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("pool %s not found", poolID)
+	}
+	return nil
 }
 
 // UpsertPool creates or updates a pool and ensures its health row exists.
@@ -445,9 +616,47 @@ func (s *Store) UpsertModel(m RouteModel) (int64, error) {
 	if strings.TrimSpace(m.PoolID) == "" || strings.TrimSpace(m.Harness) == "" || strings.TrimSpace(m.ModelID) == "" {
 		return 0, fmt.Errorf("pool_id, harness, and model_id are required")
 	}
+	var cat, routingProvider, probeSource string
+	var poolInCost, poolOutCost float64
+	_ = s.db.QueryRow(`SELECT category, COALESCE(routing_provider, ''), COALESCE(input_cost_per_1m, 0), COALESCE(output_cost_per_1m, 0), COALESCE(probe_source, '') FROM routing_pools WHERE id = ?`, m.PoolID).Scan(&cat, &routingProvider, &poolInCost, &poolOutCost, &probeSource)
+
 	if m.Billing == "" {
-		m.Billing = "byok"
+		switch NormalizeCategory(PoolCategory(cat)) {
+		case CategoryFree:
+			m.Billing = "free"
+		case CategoryPAYG:
+			m.Billing = "payg"
+		default:
+			m.Billing = "byok"
+		}
 	}
+	if m.InputCostPer1M == 0 && m.OutputCostPer1M == 0 {
+		m.InputCostPer1M = poolInCost
+		m.OutputCostPer1M = poolOutCost
+	}
+	if routingProvider == "openrouter" {
+		m.ModelID = GenerateOpenRouterModel(m.Provider, m.ModelID)
+		if m.Provider == "" {
+			m.Provider = "openrouter"
+		}
+	} else if m.Provider == "" {
+		if strings.HasPrefix(m.PoolID, "antigravity") {
+			m.Provider = "antigravity"
+		} else if strings.HasPrefix(m.PoolID, "cursor") {
+			m.Provider = "cursor"
+		} else if strings.HasPrefix(m.PoolID, "xai") {
+			m.Provider = "xai"
+		} else if probeSource != "" {
+			parts := strings.Split(probeSource, "_")
+			m.Provider = parts[0]
+		} else {
+			m.Provider = m.PoolID
+		}
+	}
+	if strings.HasPrefix(m.Overlay, "@preset/") {
+		m.Overlay = ""
+	}
+
 	overridePi := 0
 	if m.OverridePiPreference {
 		overridePi = 1
@@ -806,57 +1015,62 @@ func defaultSeedPools(now, cycleStart time.Time) []Pool {
 		{
 			ID: "nvidia-free", DisplayName: "NVIDIA Free", Category: CategoryFree, Enabled: true,
 			PaceSlack: 0.10, Weight: 100, ProbeSource: "feedback_health",
-			Notes: "$0 free pool via OpenRouter @preset/code-nvidia (health-gated)", UpdatedAt: now,
+			RoutingProvider: "openrouter",
+			Notes: "$0 free pool via OpenRouter (health-gated)", UpdatedAt: now,
 		},
 		{
-			ID: "antigravity-3p", DisplayName: "Antigravity Claude+GPT", Category: CategoryMonthlyCooldown, Enabled: true,
-			WindowHours: 168, PaceSlack: 0.10, Weight: 100, ProbeSource: "antigravity_3p",
+			ID: "antigravity-3p", DisplayName: "Antigravity Claude+GPT", Category: CategorySubscription, Enabled: true,
+			ResetCycle: "weekly", InnerWindowHours: 5, WindowHours: 168, PaceSlack: 0.10, Weight: 100, ProbeSource: "antigravity_3p",
 			Notes: "Antigravity 3P (Claude Opus/Sonnet 5.5, GPT-OSS) 5h & 7d windows", UpdatedAt: now,
 		},
 		{
-			ID: "antigravity-gemini", DisplayName: "Antigravity Gemini", Category: CategoryMonthlyCooldown, Enabled: true,
-			WindowHours: 168, PaceSlack: 0.10, Weight: 95, ProbeSource: "antigravity_gemini",
-			Notes: "Antigravity Gemini Pro/Argon/Hydrogen 5h & 7d windows", UpdatedAt: now,
+			ID: "antigravity-argon", DisplayName: "Antigravity Argon", Category: CategorySubscription, Enabled: true,
+			ResetCycle: "weekly", InnerWindowHours: 0, WindowHours: 168, PaceSlack: 0.10, Weight: 98, ProbeSource: "antigravity_argon",
+			Notes: "Antigravity Gemini 4 Argon weekly window", UpdatedAt: now,
 		},
 		{
-			ID: "antigravity-flash", DisplayName: "Antigravity Flash", Category: CategoryMonthlyCooldown, Enabled: true,
-			WindowHours: 168, PaceSlack: 0.10, Weight: 90, ProbeSource: "antigravity_flash",
-			Notes: "Antigravity Gemini Flash window", UpdatedAt: now,
+			ID: "antigravity-gemini", DisplayName: "Antigravity Gemini", Category: CategorySubscription, Enabled: true,
+			ResetCycle: "weekly", InnerWindowHours: 5, WindowHours: 168, PaceSlack: 0.10, Weight: 95, ProbeSource: "antigravity_gemini",
+			Notes: "Antigravity Gemini (Hydrogen & Flash) 5h & 7d windows", UpdatedAt: now,
 		},
 		{
-			ID: "xai", DisplayName: "xAI / Grok", Category: CategoryMonthlyCooldown, Enabled: true,
-			WindowHours: 720, PaceSlack: 0.10, Weight: 90, ProbeSource: "grok",
+			ID: "xai", DisplayName: "xAI / Grok", Category: CategorySubscription, Enabled: true,
+			ResetCycle: "weekly", InnerWindowHours: 0, WindowHours: 168, PaceSlack: 0.10, Weight: 90, ProbeSource: "grok",
+			RoutingProvider: "openrouter",
 			Notes: "Grok subscription (100% combined Grok Build + OpenRouter BYOK)", UpdatedAt: now,
 		},
 		{
-			ID: "claude", DisplayName: "Claude Subscription", Category: CategoryMonthlyCooldown, Enabled: true,
-			WindowHours: 168, PaceSlack: 0.10, Weight: 85, ProbeSource: "anthropic",
+			ID: "claude", DisplayName: "Claude Subscription", Category: CategorySubscription, Enabled: true,
+			ResetCycle: "weekly", InnerWindowHours: 5, WindowHours: 168, PaceSlack: 0.10, Weight: 85, ProbeSource: "anthropic",
 			Notes: "Anthropic Claude Pro/Max 5h & 7d windows", UpdatedAt: now,
 		},
 		{
-			ID: "codex", DisplayName: "Codex / ChatGPT", Category: CategoryMonthlyCooldown, Enabled: true,
-			WindowHours: 168, PaceSlack: 0.10, Weight: 85, ProbeSource: "codex",
+			ID: "codex", DisplayName: "Codex / ChatGPT", Category: CategorySubscription, Enabled: true,
+			ResetCycle: "weekly", InnerWindowHours: 5, WindowHours: 168, PaceSlack: 0.10, Weight: 85, ProbeSource: "codex",
 			Notes: "OpenAI Codex 5h & 7d windows", UpdatedAt: now,
 		},
 		{
-			ID: "cursor", DisplayName: "Cursor", Category: CategoryMonthlyNoCooldown, Enabled: true,
-			CapUSD: 500, ReserveUSD: 0, ResetDay: 1, PaceSlack: 0.10, Weight: 90, ProbeSource: "cursor",
+			ID: "cursor", DisplayName: "Cursor", Category: CategoryAllowance, Enabled: true,
+			CapUSD: 500, ReserveUSD: 0, ResetDay: 1, ResetCycle: "monthly", PaceSlack: 0.10, Weight: 90, ProbeSource: "cursor",
 			CycleStart: &cs, Notes: "Cursor $500/mo cap + reserve, resets day 1", UpdatedAt: now,
 		},
 		{
-			ID: "google-ai-studio", DisplayName: "Google AI Studio", Category: CategoryMonthlyNoCooldown, Enabled: true,
-			CapUSD: 15, ReserveUSD: 0, ResetDay: 1, PaceSlack: 0.10, Weight: 85, ProbeSource: "google_ai_studio",
-			CycleStart: &cs, Notes: "$15/mo credit voucher via @preset/code-google", UpdatedAt: now,
+			ID: "google-ai-studio", DisplayName: "Google AI Studio", Category: CategoryAllowance, Enabled: true,
+			CapUSD: 15, ReserveUSD: 0, ResetDay: 1, ResetCycle: "monthly", PaceSlack: 0.10, Weight: 85, ProbeSource: "google_ai_studio",
+			RoutingProvider: "openrouter", InputCostPer1M: 0.30, OutputCostPer1M: 2.50,
+			CycleStart: &cs, Notes: "$15/mo credit voucher via Google AI Studio", UpdatedAt: now,
 		},
 		{
-			ID: "chutes", DisplayName: "Chutes PAYG", Category: CategoryPAYG, Enabled: true,
-			CapUSD: 5, ReserveUSD: 0, ResetDay: 1, PaceSlack: 0.10, Weight: 100, ProbeSource: "chutes",
-			CycleStart: &cs, Notes: "Chutes $5 PAYG cap with prompt caching via @preset/code-chutes", UpdatedAt: now,
+			ID: "chutes", DisplayName: "Chutes", Category: CategoryPAYG, Enabled: true,
+			CapUSD: 0, ReserveUSD: 0, ResetDay: 1, ResetCycle: "monthly", PaceSlack: 0.10, Weight: 100, ProbeSource: "chutes",
+			RoutingProvider: "openrouter", InputCostPer1M: 0.15, OutputCostPer1M: 0.50,
+			CycleStart: &cs, Notes: "Chutes PAYG balance with prompt caching", UpdatedAt: now,
 		},
 		{
-			ID: "openrouter-payg", DisplayName: "OpenRouter PAYG", Category: CategoryPAYG, Enabled: true,
-			CapUSD: 5, ReserveUSD: 0, ResetDay: 1, PaceSlack: 0.10, Weight: 80, ProbeSource: "openrouter",
-			CycleStart: &cs, Notes: "$5/mo PAYG cap on t3-code-main via @preset/code-payg", UpdatedAt: now,
+			ID: "openrouter-payg", DisplayName: "OpenRouter", Category: CategoryPAYG, Enabled: true,
+			CapUSD: 0, ReserveUSD: 0, ResetDay: 1, ResetCycle: "monthly", PaceSlack: 0.10, Weight: 80, ProbeSource: "openrouter",
+			RoutingProvider: "openrouter", InputCostPer1M: 0.20, OutputCostPer1M: 0.60,
+			CycleStart: &cs, Notes: "PAYG balance on t3-code-main", UpdatedAt: now,
 		},
 	}
 }
@@ -864,93 +1078,76 @@ func defaultSeedPools(now, cycleStart time.Time) []Pool {
 func defaultSeedModels() []RouteModel {
 	return []RouteModel{
 		// --- Frontier ---
-		{Tier: TierFrontier, PoolID: "antigravity-3p", Harness: "pi", Provider: "antigravity", ModelID: "claude-opus-5-5", Billing: "byok", Description: "Top-tier Claude Opus 5.5 for deep architecture, complex debugging, and multi-file refactors", Priority: 120, Enabled: true},
-		{Tier: TierFrontier, PoolID: "antigravity-3p", Harness: "pi", Provider: "antigravity", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Fast frontier coding and code review via Antigravity", Priority: 100, Enabled: true},
-		{Tier: TierFrontier, PoolID: "antigravity-3p", Harness: "antigravity", Provider: "antigravity", ModelID: "claude-opus-5-5", Billing: "byok", Description: "Native Antigravity Claude Opus 5.5", Priority: 120, Enabled: true},
-		{Tier: TierFrontier, PoolID: "antigravity-3p", Harness: "antigravity", Provider: "antigravity", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Native Antigravity Claude Sonnet 5.5", Priority: 100, Enabled: true},
+		{Tier: TierFrontier, PoolID: "antigravity-3p", Harness: "antigravity", Provider: "antigravity", ModelID: "claude-opus-5-5", Billing: "byok", Description: "Native Antigravity Claude Opus 5.5", Priority: 100, Enabled: true},
+		{Tier: TierFrontier, PoolID: "antigravity-3p", Harness: "antigravity", Provider: "antigravity", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Native Antigravity Claude Sonnet 5.5", Priority: 90, Enabled: true},
 
-		{Tier: TierFrontier, PoolID: "antigravity-gemini", Harness: "pi", Provider: "antigravity", ModelID: "gemini-4-argon", Billing: "byok", Description: "Gemini 4 Argon for deep reasoning and long-context codebase synthesis", Priority: 110, Enabled: true},
-		{Tier: TierFrontier, PoolID: "antigravity-gemini", Harness: "antigravity", Provider: "antigravity", ModelID: "gemini-4-argon", Billing: "byok", Description: "Native Antigravity Gemini 4 Argon", Priority: 110, Enabled: true},
+		{Tier: TierFrontier, PoolID: "antigravity-argon", Harness: "antigravity", Provider: "antigravity", ModelID: "gemini-4-argon", Billing: "byok", Description: "Native Antigravity Gemini 4 Argon", Priority: 100, Enabled: true},
 
-		{Tier: TierFrontier, PoolID: "xai", Harness: "pi", Provider: "openrouter", Overlay: "@preset/code-xai", ModelID: "x-ai/grok-4.7", Billing: "byok", Description: "Frontier Grok 4.7 reasoning & coding via xAI BYOK", Priority: 110, Enabled: true},
-		{Tier: TierFrontier, PoolID: "xai", Harness: "pi", Provider: "openrouter", Overlay: "@preset/code-xai", ModelID: "x-ai/grok-4.6", Billing: "byok", Description: "Grok 4.6 fallback within xAI BYOK", Priority: 90, Enabled: true},
-		{Tier: TierFrontier, PoolID: "xai", Harness: "grok", Provider: "grok", ModelID: "grok-4.7", Billing: "byok", Description: "Native Grok CLI Grok 4.7", Priority: 110, Enabled: true},
-		{Tier: TierFrontier, PoolID: "xai", Harness: "grok", Provider: "grok", ModelID: "grok-4.6", Billing: "byok", Description: "Native Grok CLI Grok 4.6", Priority: 90, Enabled: true},
+		{Tier: TierFrontier, PoolID: "xai", Harness: "pi", Provider: "openrouter", ModelID: "x-ai/grok-4.7", Billing: "byok", Description: "Frontier Grok 4.7 reasoning & coding via xAI BYOK", Priority: 100, Enabled: true},
+		{Tier: TierFrontier, PoolID: "xai", Harness: "grok", Provider: "grok", ModelID: "grok-4.7", Billing: "byok", Description: "Native Grok CLI Grok 4.7", Priority: 100, Enabled: true},
 
-		{Tier: TierFrontier, PoolID: "claude", Harness: "pi", Provider: "anthropic", ModelID: "claude-opus-5-5", Billing: "byok", Description: "Claude Opus 5.5 direct subscription", Priority: 110, Enabled: true},
-		{Tier: TierFrontier, PoolID: "claude", Harness: "claudeAgent", Provider: "claudeAgent", ModelID: "claude-opus-5-5", Billing: "byok", Description: "Native Claude Code Opus 5.5", Priority: 110, Enabled: true},
-		{Tier: TierFrontier, PoolID: "claude", Harness: "claudeAgent", Provider: "claudeAgent", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Native Claude Code Sonnet 5.5", Priority: 95, Enabled: true},
+		{Tier: TierFrontier, PoolID: "claude", Harness: "claudeAgent", Provider: "claudeAgent", ModelID: "claude-opus-5-5", Billing: "byok", Description: "Native Claude Code Opus 5.5", Priority: 100, Enabled: true},
+		{Tier: TierFrontier, PoolID: "claude", Harness: "claudeAgent", Provider: "claudeAgent", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Native Claude Code Sonnet 5.5", Priority: 90, Enabled: true},
 
-		{Tier: TierFrontier, PoolID: "codex", Harness: "pi", Provider: "openai", ModelID: "gpt-5.3-codex", Billing: "byok", Description: "Codex 5.3 frontier software engineering", Priority: 110, Enabled: true},
-		{Tier: TierFrontier, PoolID: "codex", Harness: "codex", Provider: "codex", ModelID: "gpt-5.3-codex", Billing: "byok", Description: "Native Codex CLI 5.3", Priority: 110, Enabled: true},
+		{Tier: TierFrontier, PoolID: "codex", Harness: "codex", Provider: "codex", ModelID: "gpt-5.3-codex", Billing: "byok", Description: "Native Codex CLI 5.3", Priority: 100, Enabled: true},
 
-		{Tier: TierFrontier, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "claude-opus-5-5", Billing: "byok", Description: "Cursor Claude Opus 5.5 for complex implementation", Priority: 120, Enabled: true},
-		{Tier: TierFrontier, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "gpt-5.6-sol", Billing: "byok", Description: "Cursor GPT-5.6 Sol for deep verification and math/logic", Priority: 110, Enabled: true},
-		{Tier: TierFrontier, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "grok-4.7", Billing: "byok", Description: "Cursor Grok 4.7", Priority: 100, Enabled: true},
-		{Tier: TierFrontier, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "gemini-4-carbon", Billing: "byok", Description: "Cursor Gemini 4 Carbon for large multi-file context", Priority: 95, Enabled: true},
+		{Tier: TierFrontier, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "claude-opus-5-5", Billing: "byok", Description: "Cursor Claude Opus 5.5 for complex implementation", Priority: 100, Enabled: true},
+		{Tier: TierFrontier, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "gpt-5.6-sol", Billing: "byok", Description: "Cursor GPT-5.6 Sol for deep verification and math/logic", Priority: 95, Enabled: true},
+		{Tier: TierFrontier, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "grok-4.7", Billing: "byok", Description: "Cursor Grok 4.7", Priority: 90, Enabled: true},
+		{Tier: TierFrontier, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "gemini-4-carbon", Billing: "byok", Description: "Cursor Gemini 4 Carbon for large multi-file context", Priority: 85, Enabled: true},
 
-		{Tier: TierFrontier, PoolID: "google-ai-studio", Harness: "pi", Provider: "google-ai-studio", Overlay: "@preset/code-google", ModelID: "google/gemini-4-carbon", Billing: "byok", Description: "1M+ context Gemini 4 Carbon via Google AI Studio voucher", Priority: 110, InputCostPer1M: 1.25, OutputCostPer1M: 10.0, Enabled: true},
+		{Tier: TierFrontier, PoolID: "google-ai-studio", Harness: "pi", Provider: "openrouter", ModelID: "google/gemini-4-carbon", Billing: "byok", Description: "1M+ context Gemini 4 Carbon via Google AI Studio voucher", Priority: 100, InputCostPer1M: 1.25, OutputCostPer1M: 10.0, Enabled: true},
 
-		{Tier: TierFrontier, PoolID: "chutes", Harness: "pi", Provider: "chutes", Overlay: "@preset/code-chutes", ModelID: "z-ai/glm-5.1", Billing: "byok", Description: "Frontier open-weights GLM-5.1 on Chutes with prompt caching", Priority: 110, InputCostPer1M: 0.50, OutputCostPer1M: 2.00, Enabled: true},
+		{Tier: TierFrontier, PoolID: "chutes", Harness: "pi", Provider: "openrouter", ModelID: "z-ai/glm-5.1", Billing: "byok", Description: "Frontier open-weights GLM-5.1 on Chutes with prompt caching", Priority: 100, InputCostPer1M: 0.50, OutputCostPer1M: 2.00, Enabled: true},
 
-		{Tier: TierFrontier, PoolID: "openrouter-payg", Harness: "pi", Provider: "openrouter", Overlay: "@preset/code-payg", ModelID: "openai/gpt-6.1-terra", Billing: "payg", Description: "GPT-6.1 Terra balanced frontier PAYG", Priority: 110, InputCostPer1M: 2.00, OutputCostPer1M: 8.00, Enabled: true},
-		{Tier: TierFrontier, PoolID: "openrouter-payg", Harness: "pi", Provider: "openrouter", Overlay: "@preset/code-payg", ModelID: "openai/gpt-6.1-sol-pro", Billing: "payg", Description: "GPT-6.1 Sol Pro hardest problems PAYG", Priority: 100, InputCostPer1M: 5.00, OutputCostPer1M: 15.00, Enabled: true},
+		{Tier: TierFrontier, PoolID: "openrouter-payg", Harness: "pi", Provider: "openrouter", ModelID: "openai/gpt-6.1-terra", Billing: "payg", Description: "GPT-6.1 Terra balanced frontier PAYG", Priority: 100, InputCostPer1M: 2.00, OutputCostPer1M: 8.00, Enabled: true},
 
 		// --- Workhorse ---
-		{Tier: TierWorkhorse, PoolID: "nvidia-free", Harness: "pi", Provider: "nvidia", Overlay: "@preset/code-nvidia", ModelID: "nvidia/nemotron-3-ultra-550b-a55b:free", Billing: "free", Description: "$0 Nemotron Ultra 550B for everyday coding and tests", Priority: 110, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "antigravity-gemini", Harness: "antigravity", Provider: "antigravity", ModelID: "gemini-4-hydrogen", Billing: "byok", Description: "Native Antigravity Gemini 4 Hydrogen", Priority: 100, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "antigravity-3p", Harness: "antigravity", Provider: "antigravity", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Native Antigravity Claude Sonnet 5.5", Priority: 100, Enabled: true},
 
-		{Tier: TierWorkhorse, PoolID: "antigravity-gemini", Harness: "pi", Provider: "antigravity", ModelID: "gemini-4-hydrogen", Billing: "byok", Description: "Gemini 4 Hydrogen fast balanced coding workhorse", Priority: 110, Enabled: true},
-		{Tier: TierWorkhorse, PoolID: "antigravity-gemini", Harness: "antigravity", Provider: "antigravity", ModelID: "gemini-4-hydrogen", Billing: "byok", Description: "Native Antigravity Gemini 4 Hydrogen", Priority: 110, Enabled: true},
-		{Tier: TierWorkhorse, PoolID: "antigravity-3p", Harness: "pi", Provider: "antigravity", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Claude Sonnet 5.5 via Antigravity 3P", Priority: 105, Enabled: true},
-		{Tier: TierWorkhorse, PoolID: "antigravity-3p", Harness: "antigravity", Provider: "antigravity", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Native Antigravity Claude Sonnet 5.5", Priority: 105, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "xai", Harness: "pi", Provider: "openrouter", ModelID: "x-ai/grok-build-0.1", Billing: "byok", Description: "Fast agentic coding Grok Build 0.1 via xAI BYOK", Priority: 100, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "xai", Harness: "pi", Provider: "openrouter", ModelID: "x-ai/grok-4.3", Billing: "byok", Description: "Grok 4.3 1M context window via xAI BYOK", Priority: 90, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "xai", Harness: "grok", Provider: "grok", ModelID: "grok-4.7-build-fast", Billing: "byok", Description: "Native Grok CLI fast build workhorse", Priority: 100, Enabled: true},
 
-		{Tier: TierWorkhorse, PoolID: "xai", Harness: "pi", Provider: "openrouter", Overlay: "@preset/code-xai", ModelID: "x-ai/grok-build-0.1", Billing: "byok", Description: "Fast agentic coding Grok Build 0.1 via xAI BYOK", Priority: 115, Enabled: true},
-		{Tier: TierWorkhorse, PoolID: "xai", Harness: "pi", Provider: "openrouter", Overlay: "@preset/code-xai", ModelID: "x-ai/grok-4.3", Billing: "byok", Description: "Grok 4.3 1M context window via xAI BYOK", Priority: 100, Enabled: true},
-		{Tier: TierWorkhorse, PoolID: "xai", Harness: "grok", Provider: "grok", ModelID: "grok-4.7-build-fast", Billing: "byok", Description: "Native Grok CLI fast build workhorse", Priority: 110, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "claude", Harness: "claudeAgent", Provider: "claudeAgent", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Native Claude Code Sonnet 5.5", Priority: 100, Enabled: true},
 
-		{Tier: TierWorkhorse, PoolID: "claude", Harness: "pi", Provider: "anthropic", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Claude Sonnet 5.5 direct subscription", Priority: 110, Enabled: true},
-		{Tier: TierWorkhorse, PoolID: "claude", Harness: "claudeAgent", Provider: "claudeAgent", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Native Claude Code Sonnet 5.5", Priority: 110, Enabled: true},
-
-		{Tier: TierWorkhorse, PoolID: "codex", Harness: "pi", Provider: "openai", ModelID: "gpt-5.3-codex", Billing: "byok", Description: "Codex 5.3 daily workhorse", Priority: 100, Enabled: true},
 		{Tier: TierWorkhorse, PoolID: "codex", Harness: "codex", Provider: "codex", ModelID: "gpt-5.3-codex", Billing: "byok", Description: "Native Codex CLI 5.3", Priority: 100, Enabled: true},
 
-		{Tier: TierWorkhorse, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "composer-2.5", Billing: "byok", Description: "Cursor Composer 2.5 fast multi-file edits", Priority: 115, Enabled: true},
-		{Tier: TierWorkhorse, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Cursor Claude Sonnet 5.5", Priority: 105, Enabled: true},
-		{Tier: TierWorkhorse, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "gpt-5.5", Billing: "byok", Description: "Cursor GPT-5.5", Priority: 95, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "composer-2.5", Billing: "byok", Description: "Cursor Composer 2.5 fast multi-file edits", Priority: 100, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "claude-sonnet-5-5", Billing: "byok", Description: "Cursor Claude Sonnet 5.5", Priority: 95, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "gpt-5.5", Billing: "byok", Description: "Cursor GPT-5.5", Priority: 90, Enabled: true},
 
-		{Tier: TierWorkhorse, PoolID: "google-ai-studio", Harness: "pi", Provider: "google-ai-studio", Overlay: "@preset/code-google", ModelID: "google/gemini-4-hydrogen", Billing: "byok", Description: "Gemini 4 Hydrogen 1M context via Google AI Studio voucher", Priority: 115, InputCostPer1M: 0.30, OutputCostPer1M: 2.50, Enabled: true},
-		{Tier: TierWorkhorse, PoolID: "google-ai-studio", Harness: "pi", Provider: "google-ai-studio", Overlay: "@preset/code-google", ModelID: "google/gemini-3.8-flash", Billing: "byok", Description: "Gemini 3.8 Flash fast coding via Google AI Studio voucher", Priority: 100, InputCostPer1M: 0.15, OutputCostPer1M: 0.60, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "google-ai-studio", Harness: "pi", Provider: "openrouter", ModelID: "google/gemini-4-hydrogen", Billing: "byok", Description: "Gemini 4 Hydrogen 1M context via Google AI Studio voucher", Priority: 100, InputCostPer1M: 0.30, OutputCostPer1M: 2.50, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "google-ai-studio", Harness: "pi", Provider: "openrouter", ModelID: "google/gemini-3.8-flash", Billing: "byok", Description: "Gemini 3.8 Flash fast coding via Google AI Studio voucher", Priority: 90, InputCostPer1M: 0.15, OutputCostPer1M: 0.60, Enabled: true},
 
-		{Tier: TierWorkhorse, PoolID: "chutes", Harness: "pi", Provider: "chutes", Overlay: "@preset/code-chutes", ModelID: "moonshotai/kimi-k2.6", Billing: "byok", Description: "Kimi K2.6 strong agentic coding on Chutes", Priority: 110, InputCostPer1M: 0.25, OutputCostPer1M: 1.00, Enabled: true},
-		{Tier: TierWorkhorse, PoolID: "chutes", Harness: "pi", Provider: "chutes", Overlay: "@preset/code-chutes", ModelID: "deepseek/deepseek-v4-flash-0731", Billing: "byok", Description: "DeepSeek V4 Flash fast value coding on Chutes", Priority: 100, InputCostPer1M: 0.14, OutputCostPer1M: 0.42, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "chutes", Harness: "pi", Provider: "openrouter", ModelID: "moonshotai/kimi-k2.6", Billing: "byok", Description: "Kimi K2.6 strong agentic coding on Chutes", Priority: 100, InputCostPer1M: 0.25, OutputCostPer1M: 1.00, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "chutes", Harness: "pi", Provider: "openrouter", ModelID: "deepseek/deepseek-v4-flash-0731", Billing: "byok", Description: "DeepSeek V4 Flash fast value coding on Chutes", Priority: 90, InputCostPer1M: 0.14, OutputCostPer1M: 0.42, Enabled: true},
 
-		{Tier: TierWorkhorse, PoolID: "openrouter-payg", Harness: "pi", Provider: "openrouter", Overlay: "@preset/code-payg", ModelID: "deepseek/deepseek-v4.1-flash-1017", Billing: "payg", Description: "DeepSeek V4.1 Flash cheap PAYG workhorse", Priority: 110, InputCostPer1M: 0.20, OutputCostPer1M: 0.60, Enabled: true},
+		{Tier: TierWorkhorse, PoolID: "openrouter-payg", Harness: "pi", Provider: "openrouter", ModelID: "deepseek/deepseek-v4.1-flash-1017", Billing: "payg", Description: "DeepSeek V4.1 Flash cheap PAYG workhorse", Priority: 100, InputCostPer1M: 0.20, OutputCostPer1M: 0.60, Enabled: true},
 
 		// --- Lightweight ---
-		{Tier: TierLightweight, PoolID: "nvidia-free", Harness: "pi", Provider: "nvidia", Overlay: "@preset/code-nvidia", ModelID: "nvidia/nemotron-3.5-lightning:free", Billing: "free", Description: "$0 fast Nemotron Lightning for boilerplate, linting, and subagents", Priority: 120, Enabled: true},
-		{Tier: TierLightweight, PoolID: "nvidia-free", Harness: "pi", Provider: "nvidia", Overlay: "@preset/code-nvidia", ModelID: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", Billing: "free", Description: "$0 compact reasoning model for quick tasks", Priority: 100, Enabled: true},
+		{Tier: TierLightweight, PoolID: "nvidia-free", Harness: "pi", Provider: "openrouter", ModelID: "nvidia/nemotron-3.5-lightning:free", Billing: "free", Description: "$0 fast Nemotron Lightning for boilerplate, linting, and subagents", Priority: 100, Enabled: true},
+		{Tier: TierLightweight, PoolID: "nvidia-free", Harness: "pi", Provider: "openrouter", ModelID: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", Billing: "free", Description: "$0 compact reasoning model for quick tasks", Priority: 90, Enabled: true},
 
-		{Tier: TierLightweight, PoolID: "antigravity-flash", Harness: "pi", Provider: "antigravity", ModelID: "gemini-3.8-flash", Billing: "byok", Description: "Fast Gemini 3.8 Flash via Antigravity", Priority: 110, Enabled: true},
-		{Tier: TierLightweight, PoolID: "antigravity-flash", Harness: "antigravity", Provider: "antigravity", ModelID: "gemini-3.8-flash", Billing: "byok", Description: "Native Antigravity Gemini 3.8 Flash", Priority: 110, Enabled: true},
+		{Tier: TierLightweight, PoolID: "antigravity-gemini", Harness: "antigravity", Provider: "antigravity", ModelID: "gemini-3.8-flash", Billing: "byok", Description: "Native Antigravity Gemini 3.8 Flash", Priority: 100, Enabled: true},
 
-		{Tier: TierLightweight, PoolID: "xai", Harness: "pi", Provider: "openrouter", Overlay: "@preset/code-xai", ModelID: "x-ai/grok-build-0.1", Billing: "byok", Description: "Fast Grok Build 0.1 for lightweight tasks", Priority: 100, Enabled: true},
+		{Tier: TierLightweight, PoolID: "xai", Harness: "pi", Provider: "openrouter", ModelID: "x-ai/grok-build-0.1", Billing: "byok", Description: "Fast Grok Build 0.1 for lightweight tasks", Priority: 100, Enabled: true},
 		{Tier: TierLightweight, PoolID: "xai", Harness: "grok", Provider: "grok", ModelID: "grok-4.7-build-fast", Billing: "byok", Description: "Native Grok CLI fast build", Priority: 100, Enabled: true},
 
-		{Tier: TierLightweight, PoolID: "claude", Harness: "pi", Provider: "anthropic", ModelID: "claude-haiku-5-5", Billing: "byok", Description: "Claude Haiku 5.5 quick edits", Priority: 100, Enabled: true},
 		{Tier: TierLightweight, PoolID: "claude", Harness: "claudeAgent", Provider: "claudeAgent", ModelID: "claude-haiku-5-5", Billing: "byok", Description: "Native Claude Code Haiku 5.5", Priority: 100, Enabled: true},
 
-		{Tier: TierLightweight, PoolID: "codex", Harness: "pi", Provider: "openai", ModelID: "gpt-5.4-mini", Billing: "byok", Description: "GPT-5.4 Mini quick tasks", Priority: 100, Enabled: true},
 		{Tier: TierLightweight, PoolID: "codex", Harness: "codex", Provider: "codex", ModelID: "gpt-5.4-mini", Billing: "byok", Description: "Native Codex GPT-5.4 Mini", Priority: 100, Enabled: true},
 
-		{Tier: TierLightweight, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "gemini-3.8-flash", Billing: "byok", Description: "Cursor Gemini 3.8 Flash", Priority: 110, Enabled: true},
-		{Tier: TierLightweight, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "gpt-5.4-mini", Billing: "byok", Description: "Cursor GPT-5.4 Mini", Priority: 100, Enabled: true},
+		{Tier: TierLightweight, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "gemini-3.8-flash", Billing: "byok", Description: "Cursor Gemini 3.8 Flash", Priority: 100, Enabled: true},
+		{Tier: TierLightweight, PoolID: "cursor", Harness: "cursor", Provider: "cursor", ModelID: "gpt-5.4-mini", Billing: "byok", Description: "Cursor GPT-5.4 Mini", Priority: 90, Enabled: true},
 
-		{Tier: TierLightweight, PoolID: "google-ai-studio", Harness: "pi", Provider: "google-ai-studio", Overlay: "@preset/code-google", ModelID: "google/gemini-3.8-flash", Billing: "byok", Description: "Fast Gemini 3.8 Flash via Google AI Studio voucher", Priority: 110, InputCostPer1M: 0.15, OutputCostPer1M: 0.60, Enabled: true},
-		{Tier: TierLightweight, PoolID: "google-ai-studio", Harness: "pi", Provider: "google-ai-studio", Overlay: "@preset/code-google", ModelID: "google/gemma-4-31b-it:free", Billing: "free", Description: "Free Gemma 4 31B on Google AI Studio", Priority: 90, Enabled: true},
+		{Tier: TierLightweight, PoolID: "google-ai-studio", Harness: "pi", Provider: "openrouter", ModelID: "google/gemini-3.5-flash-lite", Billing: "byok", Description: "Fast Gemini 3.5 Flash Lite via Google AI Studio voucher", Priority: 100, InputCostPer1M: 0.15, OutputCostPer1M: 1.25, Enabled: true},
+		{Tier: TierLightweight, PoolID: "google-ai-studio", Harness: "pi", Provider: "openrouter", ModelID: "google/gemma-4-31b-it:free", Billing: "free", Description: "Free Gemma 4 31B on Google AI Studio", Priority: 90, Enabled: false},
 
-		{Tier: TierLightweight, PoolID: "chutes", Harness: "pi", Provider: "chutes", Overlay: "@preset/code-chutes", ModelID: "qwen/qwen3.8-27b", Billing: "byok", Description: "Fast Qwen 3.8 27B open-weights on Chutes", Priority: 110, InputCostPer1M: 0.08, OutputCostPer1M: 0.24, Enabled: true},
+		{Tier: TierLightweight, PoolID: "chutes", Harness: "pi", Provider: "openrouter", ModelID: "qwen/qwen3.8-27b", Billing: "byok", Description: "Fast Qwen 3.8 27B open-weights on Chutes", Priority: 100, InputCostPer1M: 0.08, OutputCostPer1M: 0.24, Enabled: true},
 
-		{Tier: TierLightweight, PoolID: "openrouter-payg", Harness: "pi", Provider: "openrouter", Overlay: "@preset/code-payg", ModelID: "deepseek/deepseek-v4.1-flash-1017", Billing: "payg", Description: "DeepSeek V4.1 Flash PAYG fallback", Priority: 100, InputCostPer1M: 0.20, OutputCostPer1M: 0.60, Enabled: true},
+		{Tier: TierLightweight, PoolID: "openrouter-payg", Harness: "pi", Provider: "openrouter", ModelID: "deepseek/deepseek-v4.1-flash-1017", Billing: "payg", Description: "DeepSeek V4.1 Flash PAYG fallback", Priority: 100, InputCostPer1M: 0.20, OutputCostPer1M: 0.60, Enabled: true},
 	}
 }
 

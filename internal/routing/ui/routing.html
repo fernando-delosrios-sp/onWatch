@@ -50,21 +50,25 @@
             <div class="routing-kpi-label">Eligible Pools</div>
             <div class="routing-kpi-value" id="kpi-eligible">--</div>
             <div class="routing-kpi-sub" id="kpi-eligible-sub">Loading pool state...</div>
+            <div class="routing-kpi-chips" id="kpi-eligible-chips"></div>
         </div>
         <div class="routing-kpi-card">
             <div class="routing-kpi-label">On-Pace Subscription Pools</div>
             <div class="routing-kpi-value" id="kpi-onpace">--</div>
             <div class="routing-kpi-sub" id="kpi-onpace-sub">Waterfall buckets 2 &amp; 3</div>
+            <div class="routing-kpi-chips" id="kpi-onpace-chips"></div>
         </div>
         <div class="routing-kpi-card">
             <div class="routing-kpi-label">Dollar Cap Headroom</div>
             <div class="routing-kpi-value" id="kpi-headroom">--</div>
             <div class="routing-kpi-sub" id="kpi-headroom-sub">Spendable above reserves</div>
+            <div class="routing-kpi-chips" id="kpi-headroom-chips"></div>
         </div>
         <div class="routing-kpi-card">
             <div class="routing-kpi-label">Cooldown / Exhausted</div>
             <div class="routing-kpi-value" id="kpi-blocked">--</div>
             <div class="routing-kpi-sub" id="kpi-blocked-sub">Temporary or quota-exhausted</div>
+            <div class="routing-kpi-chips" id="kpi-blocked-chips"></div>
         </div>
     </section>
 
@@ -87,11 +91,7 @@
                 <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                     <label for="harness-preview-select" class="text-muted">Caller harnesses:</label>
                     <select id="harness-preview-select" class="routing-select">
-                        <option value="">All harnesses</option>
-                        <option value="pi">pi only</option>
-                        <option value="pi,cursor,antigravity,grok,claudeAgent,codex" selected>pi + all native (default)</option>
-                        <option value="cursor">cursor only</option>
-                        <option value="claudeAgent,codex,grok">native CLIs only</option>
+                        <option value="" selected>All harnesses</option>
                     </select>
                 </div>
             </div>
@@ -107,10 +107,10 @@
             </div>
             <div class="waterfall-legend">
                 <span class="badge badge-free">#1 Free (healthy)</span>
-                <span class="badge badge-onpace">#2 Monthly+Cooldown On Pace</span>
-                <span class="badge badge-onpace">#3 Monthly No-Cooldown On Pace</span>
-                <span class="badge badge-ahead">#4 Monthly+Cooldown Ahead</span>
-                <span class="badge badge-ahead">#5 Monthly No-Cooldown Ahead</span>
+                <span class="badge badge-onpace">#2 Subscription On Pace</span>
+                <span class="badge badge-onpace">#3 Allowance On Pace</span>
+                <span class="badge badge-ahead">#4 Subscription Ahead</span>
+                <span class="badge badge-ahead">#5 Allowance Ahead</span>
                 <span class="badge badge-payg">#6 PAYG</span>
             </div>
             <div class="table-wrap">
@@ -138,25 +138,26 @@
         <div class="routing-card">
             <div class="routing-card-header">
                 <div>
-                    <h2 class="routing-card-title">Pool Caps, Reserves, Pacing &amp; Weights</h2>
-                    <p class="routing-card-desc">Adjust monthly caps, safety reserves, tracked USD spend (e.g. Google AI Studio voucher), reset day, expiration date, pace slack, and weight.</p>
+                    <h2 class="routing-card-title">Pool Cycles, Caps, Pacing &amp; Weights</h2>
+                    <p class="routing-card-desc">Configure subscription cycles, allowance caps (daily/weekly/monthly), PAYG budgets, pace slack, and weights. Categories for integrated providers are managed automatically.</p>
                 </div>
             </div>
             <div class="table-wrap">
-                <table class="routing-table">
+                <table class="routing-table pools-editor-table">
                     <thead>
                         <tr>
                             <th>Pool</th>
-                            <th>Enabled</th>
+                            <th style="text-align:center;">Enabled</th>
                             <th>Category</th>
+                            <th>Routing</th>
                             <th>Cap ($)</th>
-                            <th>Reserve ($)</th>
-                            <th>Spent ($)</th>
-                            <th>Reset Day</th>
-                            <th>Expires At (RFC3339 / YYYY-MM-DD)</th>
-                            <th>Pace Slack</th>
+                            <th>Cycle</th>
+                            <th title="Inner rolling window (hours)">Inner Win</th>
+                            <th title="Cycle expiration date (YYYY-MM-DD)">Expires</th>
+                            <th title="Input / Output cost per 1M tokens">Cost ($/1M)</th>
+                            <th title="Pace slack factor (0 to 1)">Slack</th>
                             <th>Weight</th>
-                            <th>Save</th>
+                            <th style="text-align:center;">Actions</th>
                         </tr>
                     </thead>
                     <tbody id="pools-editor-body"></tbody>
@@ -171,7 +172,7 @@
             <div class="routing-card-header">
                 <div>
                     <h2 class="routing-card-title">Add or Update Route Model</h2>
-                    <p class="routing-card-desc">Configure per-tier candidates, harness routes, OpenRouter preset overlays, priority, and token pricing for cost tracking.</p>
+                    <p class="routing-card-desc">Configure per-tier candidates, harness routes, provider models, priority, and token pricing for cost tracking.</p>
                 </div>
             </div>
             <form id="model-form">
@@ -191,49 +192,38 @@
                     </div>
                     <div class="routing-field">
                         <label for="m-harness">Harness</label>
-                        <input id="m-harness" class="routing-input" placeholder="pi / cursor / antigravity / grok / claudeAgent / codex" value="pi" required>
-                    </div>
-                    <div class="routing-field">
-                        <label for="m-provider">Provider</label>
-                        <input id="m-provider" class="routing-input" placeholder="openrouter / nvidia / chutes / google-ai-studio" required>
-                    </div>
-                    <div class="routing-field">
-                        <label for="m-overlay">Overlay / Preset</label>
-                        <input id="m-overlay" class="routing-input" placeholder="@preset/code-nvidia">
-                    </div>
-                    <div class="routing-field">
-                        <label for="m-model">Model ID</label>
-                        <input id="m-model" class="routing-input" placeholder="nvidia/nemotron-3-ultra-550b-a55b:free" required>
-                    </div>
-                    <div class="routing-field">
-                        <label for="m-billing">Billing</label>
-                        <select id="m-billing" class="routing-select">
-                            <option value="free">free</option>
-                            <option value="byok" selected>byok</option>
-                            <option value="payg">payg</option>
+                        <select id="m-harness" class="routing-select" required>
+                            <option value="pi" selected>pi</option>
+                            <option value="antigravity">antigravity</option>
+                            <option value="cursor">cursor</option>
+                            <option value="grok">grok</option>
+                            <option value="claudeAgent">claudeAgent</option>
+                            <option value="codex">codex</option>
+                            <option value="opencode">opencode</option>
                         </select>
+                    </div>
+                    <div class="routing-field" style="grid-column: span 2;">
+                        <label for="m-model">Model ID <button type="button" id="btn-fetch-provider-models" class="routing-btn routing-btn-ghost" style="padding:2px 8px;font-size:11px;margin-left:6px">Fetch Models</button></label>
+                        <input id="m-model" list="m-model-list" class="routing-input" placeholder="nvidia/nemotron-3-ultra-550b-a55b:free" required>
+                        <datalist id="m-model-list"></datalist>
                     </div>
                     <div class="routing-field">
                         <label for="m-priority">Priority</label>
                         <input id="m-priority" type="number" class="routing-input" value="100">
                     </div>
-                    <div class="routing-field">
-                        <label for="m-in-cost">Input $/1M</label>
-                        <input id="m-in-cost" type="number" step="0.01" class="routing-input" value="0">
-                    </div>
-                    <div class="routing-field">
-                        <label for="m-out-cost">Output $/1M</label>
-                        <input id="m-out-cost" type="number" step="0.01" class="routing-input" value="0">
-                    </div>
                 </div>
-                <div class="routing-form-grid">
-                    <div class="routing-field" style="grid-column: span 2;">
+                <div class="routing-form-grid" style="margin-top:10px;">
+                    <div class="routing-field" style="grid-column: span 3;">
                         <label for="m-desc">Description (shown to Jev selector)</label>
                         <input id="m-desc" class="routing-input" placeholder="Short strengths/use-case description">
                     </div>
-                    <div class="routing-field" style="justify-content:flex-end;">
-                        <label><input type="checkbox" id="m-override-pi"> Override pi preference</label>
-                        <label><input type="checkbox" id="m-enabled" checked> Enabled</label>
+                    <div class="routing-field" style="justify-content:flex-end;align-items:flex-start;gap:8px;padding-bottom:4px;">
+                        <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-size:0.82rem;font-weight:500;">
+                            <input type="checkbox" id="m-route-openrouter" style="margin:0;"> Route via OpenRouter
+                        </label>
+                        <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-size:0.82rem;font-weight:500;">
+                            <input type="checkbox" id="m-enabled" checked style="margin:0;"> Enabled
+                        </label>
                     </div>
                     <div class="routing-field" style="justify-content:flex-end;flex-direction:row;align-items:flex-end;gap:8px;">
                         <button type="submit" class="routing-btn routing-btn-primary" id="btn-save-model">Save Model</button>
@@ -267,9 +257,9 @@
                         <tr>
                             <th>Tier</th>
                             <th>Pool</th>
-                            <th>Harness / Provider</th>
-                            <th>Model &amp; Overlay</th>
-                            <th>Billing</th>
+                            <th>Harness</th>
+                            <th>Model</th>
+                            <th>Routing</th>
                             <th>Prio</th>
                             <th>Description</th>
                             <th>Actions</th>
@@ -278,17 +268,6 @@
                     <tbody id="models-table-body"></tbody>
                 </table>
             </div>
-        </div>
-
-        <div class="routing-card">
-            <div class="routing-card-header">
-                <div>
-                    <h2 class="routing-card-title">Excluded Models</h2>
-                    <p class="routing-card-desc">Models blocked from routing and exported in <code>excluded_models</code> for <code>or-iac import-catalog</code> (one per line).</p>
-                </div>
-                <button class="routing-btn routing-btn-primary" id="btn-save-excluded">Save Excluded List</button>
-            </div>
-            <textarea id="excluded-models-text" class="routing-textarea" rows="5"></textarea>
         </div>
     </section>
 

@@ -26,13 +26,18 @@ type CatalogPoolYAML struct {
 	Enabled     bool         `yaml:"enabled" json:"enabled"`
 	CapUSD      float64      `yaml:"cap_usd,omitempty" json:"cap_usd,omitempty"`
 	ReserveUSD  float64      `yaml:"reserve_usd,omitempty" json:"reserve_usd,omitempty"`
-	ResetDay    int          `yaml:"reset_day,omitempty" json:"reset_day,omitempty"`
-	ExpiresAt   string       `yaml:"expires_at,omitempty" json:"expires_at,omitempty"`
-	WindowHours int          `yaml:"window_hours,omitempty" json:"window_hours,omitempty"`
-	PaceSlack   float64      `yaml:"pace_slack,omitempty" json:"pace_slack,omitempty"`
-	Weight      int          `yaml:"weight,omitempty" json:"weight,omitempty"`
-	ProbeSource string       `yaml:"probe_source,omitempty" json:"probe_source,omitempty"`
-	Notes       string       `yaml:"notes,omitempty" json:"notes,omitempty"`
+	ResetDay         int          `yaml:"reset_day,omitempty" json:"reset_day,omitempty"`
+	ResetCycle       string       `yaml:"reset_cycle,omitempty" json:"reset_cycle,omitempty"`
+	InnerWindowHours int          `yaml:"inner_window_hours,omitempty" json:"inner_window_hours,omitempty"`
+	ExpiresAt        string       `yaml:"expires_at,omitempty" json:"expires_at,omitempty"`
+	WindowHours      int          `yaml:"window_hours,omitempty" json:"window_hours,omitempty"`
+	PaceSlack        float64      `yaml:"pace_slack,omitempty" json:"pace_slack,omitempty"`
+	Weight           int          `yaml:"weight,omitempty" json:"weight,omitempty"`
+	ProbeSource      string       `yaml:"probe_source,omitempty" json:"probe_source,omitempty"`
+	RoutingProvider  string       `yaml:"routing_provider,omitempty" json:"routing_provider,omitempty"`
+	InputCostPer1M   float64      `yaml:"input_cost_per_1m,omitempty" json:"input_cost_per_1m,omitempty"`
+	OutputCostPer1M  float64      `yaml:"output_cost_per_1m,omitempty" json:"output_cost_per_1m,omitempty"`
+	Notes            string       `yaml:"notes,omitempty" json:"notes,omitempty"`
 }
 
 // CatalogModelYAML represents one model route entry inside a tier.
@@ -87,12 +92,17 @@ func (e *Engine) BuildCatalog(now time.Time) (*CatalogYAML, error) {
 			Enabled:     p.Enabled,
 			CapUSD:      p.CapUSD,
 			ReserveUSD:  p.ReserveUSD,
-			ResetDay:    p.ResetDay,
-			WindowHours: p.WindowHours,
-			PaceSlack:   p.PaceSlack,
-			Weight:      p.Weight,
-			ProbeSource: p.ProbeSource,
-			Notes:       p.Notes,
+			ResetDay:         p.ResetDay,
+			ResetCycle:       p.ResetCycle,
+			InnerWindowHours: p.InnerWindowHours,
+			WindowHours:      p.WindowHours,
+			PaceSlack:        p.PaceSlack,
+			Weight:           p.Weight,
+			ProbeSource:      p.ProbeSource,
+			RoutingProvider:  p.RoutingProvider,
+			InputCostPer1M:   p.InputCostPer1M,
+			OutputCostPer1M:  p.OutputCostPer1M,
+			Notes:            p.Notes,
 		}
 		if p.ExpiresAt != nil {
 			cp.ExpiresAt = p.ExpiresAt.UTC().Format(time.RFC3339)
@@ -178,11 +188,13 @@ func (e *Engine) ImportCatalog(cat *CatalogYAML) error {
 		if p.DisplayName == "" {
 			p.DisplayName = id
 		}
-		p.Category = cp.Category
+		p.Category = NormalizeCategory(cp.Category)
 		p.Enabled = cp.Enabled
 		p.CapUSD = cp.CapUSD
 		p.ReserveUSD = cp.ReserveUSD
 		p.ResetDay = cp.ResetDay
+		p.ResetCycle = cp.ResetCycle
+		p.InnerWindowHours = cp.InnerWindowHours
 		p.WindowHours = cp.WindowHours
 		p.PaceSlack = cp.PaceSlack
 		if cp.Weight > 0 {
@@ -192,6 +204,15 @@ func (e *Engine) ImportCatalog(cat *CatalogYAML) error {
 		}
 		if cp.ProbeSource != "" {
 			p.ProbeSource = cp.ProbeSource
+		}
+		if cp.RoutingProvider != "" {
+			p.RoutingProvider = cp.RoutingProvider
+		}
+		if cp.InputCostPer1M > 0 {
+			p.InputCostPer1M = cp.InputCostPer1M
+		}
+		if cp.OutputCostPer1M > 0 {
+			p.OutputCostPer1M = cp.OutputCostPer1M
 		}
 		p.Notes = cp.Notes
 		if cp.ExpiresAt != "" {
@@ -222,7 +243,8 @@ func (e *Engine) ImportCatalog(cat *CatalogYAML) error {
 			if poolID == "" {
 				poolID = inferPoolFromCatalogEntry(entry)
 			}
-			if _, ok := poolByID[poolID]; !ok {
+			targetPool, ok := poolByID[poolID]
+			if !ok {
 				return fmt.Errorf("model %q references unknown pool %q", modelID, poolID)
 			}
 			harness := strings.TrimSpace(entry.Harness)
@@ -235,25 +257,48 @@ func (e *Engine) ImportCatalog(cat *CatalogYAML) error {
 			}
 			billing := strings.TrimSpace(entry.Billing)
 			if billing == "" {
-				billing = "byok"
+				switch NormalizeCategory(targetPool.Category) {
+				case CategoryFree:
+					billing = "free"
+				case CategoryPAYG:
+					billing = "payg"
+				default:
+					billing = "byok"
+				}
 			}
 			prio := entry.Priority
 			if prio == 0 {
 				prio = 100
+			}
+			inCost := entry.InputCostPer1M
+			outCost := entry.OutputCostPer1M
+			if inCost == 0 && outCost == 0 {
+				inCost = targetPool.InputCostPer1M
+				outCost = targetPool.OutputCostPer1M
+			}
+			if targetPool.RoutingProvider == "openrouter" {
+				modelID = GenerateOpenRouterModel(provider, modelID)
+				if provider == "" {
+					provider = "openrouter"
+				}
+			}
+			overlay := strings.TrimSpace(entry.Overlay)
+			if strings.HasPrefix(overlay, "@preset/") {
+				overlay = ""
 			}
 			models = append(models, RouteModel{
 				Tier:                 tier,
 				PoolID:               poolID,
 				Harness:              harness,
 				Provider:             provider,
-				Overlay:              strings.TrimSpace(entry.Overlay),
+				Overlay:              overlay,
 				ModelID:              modelID,
 				Billing:              billing,
 				Description:          strings.TrimSpace(entry.Notes),
 				Priority:             prio,
 				OverridePiPreference: entry.OverridePiPreference,
-				InputCostPer1M:       entry.InputCostPer1M,
-				OutputCostPer1M:      entry.OutputCostPer1M,
+				InputCostPer1M:       inCost,
+				OutputCostPer1M:      outCost,
 				Enabled:              entry.Enabled,
 			})
 		}
@@ -297,10 +342,11 @@ func inferPoolFromCatalogEntry(entry CatalogModelYAML) string {
 	case "openai", "codex":
 		return "codex"
 	case "antigravity":
-		if strings.Contains(strings.ToLower(entry.ID), "flash") {
-			return "antigravity-flash"
+		idLower := strings.ToLower(entry.ID)
+		if strings.Contains(idLower, "argon") {
+			return "antigravity-argon"
 		}
-		if strings.Contains(strings.ToLower(entry.ID), "gemini") {
+		if strings.Contains(idLower, "gemini") || strings.Contains(idLower, "flash") || strings.Contains(idLower, "hydrogen") {
 			return "antigravity-gemini"
 		}
 		return "antigravity-3p"

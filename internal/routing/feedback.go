@@ -37,8 +37,18 @@ func (e *Engine) ApplyFeedback(ctx context.Context, in FeedbackInput, now time.T
 	kind := classifyFeedback(in)
 
 	costUSD := in.CostUSD
-	if costUSD <= 0 && (in.PromptTokens > 0 || in.CompletionTokens > 0) && matchedModel != nil {
-		costUSD = EstimateCostUSD(*matchedModel, in.PromptTokens, in.CompletionTokens, in.CachedTokens)
+	if costUSD <= 0 && (in.PromptTokens > 0 || in.CompletionTokens > 0) {
+		var m RouteModel
+		if matchedModel != nil {
+			m = *matchedModel
+		}
+		if m.InputCostPer1M == 0 && m.OutputCostPer1M == 0 && pool != nil {
+			m.InputCostPer1M = pool.InputCostPer1M
+			m.OutputCostPer1M = pool.OutputCostPer1M
+		}
+		if m.InputCostPer1M > 0 || m.OutputCostPer1M > 0 {
+			costUSD = EstimateCostUSD(m, in.PromptTokens, in.CompletionTokens, in.CachedTokens)
+		}
 	}
 	if costUSD > 0 {
 		_ = e.store.AddPoolSpend(poolID, costUSD, now)

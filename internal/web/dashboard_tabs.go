@@ -58,6 +58,12 @@ func defaultProviderTabLabel(key string) string {
 		return "Moonshot"
 	case "deepseek":
 		return "DeepSeek"
+	case "chutes":
+		return "Chutes"
+	case "nvidia":
+		return "NVIDIA NIM"
+	case "googleaistudio":
+		return "Google AI Studio"
 	case "api-integrations":
 		return "API Integrations"
 	case "both":

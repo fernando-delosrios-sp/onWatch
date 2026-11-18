@@ -257,6 +257,7 @@ func (h *Handler) buildOpenCodeCurrentOK() (response map[string]interface{}, rea
 			response["quotas"] = append(response["quotas"].([]interface{}), quotaMap)
 		}
 		applyDisplayModeToResponse(response, h.getDisplayMode("opencode"))
+		EnrichSubscriptionPace("opencode", response, now)
 		return response, true, hasData
 	}
 
@@ -302,6 +303,7 @@ func (h *Handler) buildOpenCodeCurrentOK() (response map[string]interface{}, rea
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("opencode"))
+	EnrichSubscriptionPace("opencode", response, now)
 	return response, true, hasData
 }
 

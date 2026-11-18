@@ -27,7 +27,7 @@ func TestCatalogYAMLRoundTripAndOrIacCompatibility(t *testing.T) {
 		t.Fatalf("unexpected header in exported YAML: %+v", raw)
 	}
 	text := string(data)
-	for _, want := range []string{"lightweight:", "workhorse:", "frontier:", "excluded_models:", "@preset/code-nvidia"} {
+	for _, want := range []string{"lightweight:", "workhorse:", "frontier:", "excluded_models:", "x-ai/grok-4.7"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("exported YAML missing %q", want)
 		}
@@ -47,7 +47,6 @@ func TestCatalogYAMLRoundTripAndOrIacCompatibility(t *testing.T) {
 		Notes:    "added via yaml import",
 		Pool:     "nvidia-free",
 		Harness:  "pi",
-		Overlay:  "@preset/code-nvidia",
 		Priority: 150,
 	})
 	updatedYAML, err := yaml.Marshal(&cat)

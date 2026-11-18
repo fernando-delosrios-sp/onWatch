@@ -81,6 +81,7 @@ func (h *Handler) buildMistralCurrentOK() (result map[string]interface{}, readOK
 		result["status"] = "ok"
 	}
 	applyDisplayModeToResponse(result, h.getDisplayMode("mistral"))
+	EnrichSubscriptionPace("mistral", result, time.Now().UTC())
 	return result, true, true
 }
 

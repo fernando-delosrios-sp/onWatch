@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resolvePiModel } from "./presets.ts";
+import { isFreeRouteCandidate } from "./onwatch-client.ts";
+import { isJevRoutingShellCandidate, resolvePiModel } from "./presets.ts";
 import {
   TIERS,
   type Effort,
@@ -22,6 +23,17 @@ export function createInitialSessionState(): SessionRoutingState {
   };
 }
 
+/** Clear per-turn routing state when the user selected a non-trigger model (manual provider control). */
+export function clearManualRoutingSession(state: SessionRoutingState): void {
+  state.currentTier = undefined;
+  state.currentEffort = undefined;
+  state.currentCandidate = undefined;
+  state.currentModelKey = undefined;
+  state.lastTurn = undefined;
+  state.fallbackActive = false;
+  state.fallbackReason = undefined;
+}
+
 export function candidateKey(candidate: Pick<RouteCandidate, "provider" | "model">): string {
   return `${candidate.provider}/${candidate.model}`;
 }
@@ -33,11 +45,15 @@ export function extractPromptText(prompt: string): string {
 export function filterEligibleTiers(
   route: RouteResponse,
   state: Pick<SessionRoutingState, "excludedKeys" | "excludedPools">,
+  options?: { excludeFree?: boolean },
 ): Partial<Record<Tier, RouteCandidate[]>> {
+  const excludeFree = options?.excludeFree ?? true;
   const out: Partial<Record<Tier, RouteCandidate[]>> = {};
   for (const tier of TIERS) {
     const list = route.tiers[tier] ?? [];
     const eligible = list.filter((c) => {
+      if (isJevRoutingShellCandidate(c)) return false;
+      if (excludeFree && isFreeRouteCandidate(c)) return false;
       if (c.status === "capped" || c.status === "cooling") return false;
       if (state.excludedKeys.has(candidateKey(c)) || state.excludedKeys.has(c.id)) return false;
       if (c.pool && state.excludedPools.has(c.pool)) return false;
@@ -130,7 +146,7 @@ export async function routePiTurn(options: {
   const { prompt, cwd, ctx, deps, forceReroute = false, signal } = options;
   const { onWatch, jev, state, pi } = deps;
 
-  if (forceReroute) {
+  if (forceReroute || state.stickyPool === "nvidia-free" || state.stickyPool === "nvidia") {
     state.stickyPool = undefined;
   }
 
@@ -140,6 +156,7 @@ export async function routePiTurn(options: {
       harnesses: ["pi"],
       pool: state.stickyPool,
       exclude: [...state.excludedKeys],
+      excludeFree: true,
       signal,
     });
   } catch (err) {
@@ -158,7 +175,7 @@ export async function routePiTurn(options: {
     return { action: "fallback", modelSwitched: false, thinkingSwitched: false, poolDropped: false, reason };
   }
 
-  const eligibleByTier = filterEligibleTiers(route, state);
+  const eligibleByTier = filterEligibleTiers(route, state, { excludeFree: true });
   const totalEligible = TIERS.reduce((acc, t) => acc + (eligibleByTier[t]?.length ?? 0), 0);
   if (totalEligible === 0) {
     const reason = "onWatch returned no eligible Pi candidates";

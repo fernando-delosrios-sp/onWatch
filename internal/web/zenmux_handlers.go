@@ -128,6 +128,7 @@ func (h *Handler) buildZenmuxCurrentOK(ctx context.Context) (response map[string
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("zenmux"))
+	EnrichSubscriptionPace("zenmux", response, time.Now().UTC())
 	return response, true, true
 }
 

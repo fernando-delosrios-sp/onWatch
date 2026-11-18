@@ -29,6 +29,12 @@ func (s *Store) InsertOpenRouterSnapshot(snapshot *api.OpenRouterSnapshot) (int6
 		limitRemainingVal = *snapshot.LimitRemaining
 	}
 
+	var accountTotalCredits, accountTotalUsage interface{}
+	if snapshot.AccountCredits != nil {
+		accountTotalCredits = snapshot.AccountCredits.TotalCredits
+		accountTotalUsage = snapshot.AccountCredits.TotalUsage
+	}
+
 	isFreeTier := 0
 	if snapshot.IsFreeTier {
 		isFreeTier = 1
@@ -37,8 +43,8 @@ func (s *Store) InsertOpenRouterSnapshot(snapshot *api.OpenRouterSnapshot) (int6
 	result, err := s.db.Exec(
 		`INSERT INTO openrouter_snapshots
 		(captured_at, label, usage, usage_daily, usage_weekly, usage_monthly,
-		 credit_limit, limit_remaining, is_free_tier, rate_limit_requests, rate_limit_interval)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 credit_limit, limit_remaining, is_free_tier, rate_limit_requests, rate_limit_interval, account_total_credits, account_total_usage)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		snapshot.CapturedAt.Format(time.RFC3339Nano),
 		snapshot.Label,
 		snapshot.Usage,
@@ -50,6 +56,7 @@ func (s *Store) InsertOpenRouterSnapshot(snapshot *api.OpenRouterSnapshot) (int6
 		isFreeTier,
 		snapshot.RateLimitRequests,
 		snapshot.RateLimitInterval,
+		accountTotalCredits, accountTotalUsage,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert openrouter snapshot: %w", err)
@@ -67,18 +74,18 @@ func (s *Store) InsertOpenRouterSnapshot(snapshot *api.OpenRouterSnapshot) (int6
 func (s *Store) QueryLatestOpenRouter() (*api.OpenRouterSnapshot, error) {
 	var snapshot api.OpenRouterSnapshot
 	var capturedAt string
-	var creditLimit, limitRemaining sql.NullFloat64
+	var creditLimit, limitRemaining, accountTotalCredits, accountTotalUsage sql.NullFloat64
 	var isFreeTier int
 
 	err := s.db.QueryRow(
 		`SELECT id, captured_at, label, usage, usage_daily, usage_weekly, usage_monthly,
-		 credit_limit, limit_remaining, is_free_tier, rate_limit_requests, rate_limit_interval
+		 credit_limit, limit_remaining, is_free_tier, rate_limit_requests, rate_limit_interval, account_total_credits, account_total_usage
 		FROM openrouter_snapshots ORDER BY captured_at DESC LIMIT 1`,
 	).Scan(
 		&snapshot.ID, &capturedAt, &snapshot.Label,
 		&snapshot.Usage, &snapshot.UsageDaily, &snapshot.UsageWeekly, &snapshot.UsageMonthly,
 		&creditLimit, &limitRemaining, &isFreeTier,
-		&snapshot.RateLimitRequests, &snapshot.RateLimitInterval,
+		&snapshot.RateLimitRequests, &snapshot.RateLimitInterval, &accountTotalCredits, &accountTotalUsage,
 	)
 
 	if err == sql.ErrNoRows {
@@ -96,6 +103,9 @@ func (s *Store) QueryLatestOpenRouter() (*api.OpenRouterSnapshot, error) {
 		snapshot.LimitRemaining = &limitRemaining.Float64
 	}
 	snapshot.IsFreeTier = isFreeTier != 0
+	if accountTotalCredits.Valid && accountTotalUsage.Valid {
+		snapshot.AccountCredits = &api.OpenRouterAccountCredits{TotalCredits: accountTotalCredits.Float64, TotalUsage: accountTotalUsage.Float64}
+	}
 
 	return &snapshot, nil
 }

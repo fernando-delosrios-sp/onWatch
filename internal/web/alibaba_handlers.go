@@ -640,6 +640,7 @@ func (h *Handler) buildAlibabaCurrentOK(accountID int64) (response map[string]in
 	}
 	response["quotas"] = out
 	applyDisplayModeToResponse(response, h.getDisplayMode("alibaba"))
+	EnrichSubscriptionPace("alibaba", response, now)
 	return response, true, hasData
 }
 

@@ -37,6 +37,7 @@ type OpenRouterSnapshot struct {
 	UsageMonthly      float64
 	Limit             *float64
 	LimitRemaining    *float64
+	AccountCredits    *OpenRouterAccountCredits
 	IsFreeTier        bool
 	RateLimitRequests int
 	RateLimitInterval string

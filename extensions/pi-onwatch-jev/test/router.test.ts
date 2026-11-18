@@ -37,7 +37,7 @@ const CHUTES: RouteCandidate = {
   model: "@preset/code-chutes",
   id: "openrouter/@preset/code-chutes",
   tier: "workhorse",
-  description: "Chutes PAYG",
+  description: "Chutes",
   pool: "chutes",
   status: "ready",
 };
@@ -248,4 +248,58 @@ test("Branch A falls back cleanly and notifies user when onWatch or Jev is unrea
   assert.equal(calls.length, 0);
   assert.equal(state.fallbackActive, true);
   assert.ok(notifications.some((n) => n.msg.includes("fallback")));
+});
+
+test("Branch A (Jev Routing onWatch) requests excludeFree and filters out free models", async () => {
+  const { pi, ctx } = makeFakePiContext({ provider: "openrouter", id: "@preset/jev-routing", reasoning: true });
+  const state = createInitialSessionState();
+  state.stickyPool = "nvidia-free";
+  const seenOpts: any[] = [];
+  const seenCandidates: string[] = [];
+
+  const freeGemma: RouteCandidate = {
+    harness: "pi",
+    provider: "google-ai-studio",
+    model: "google/gemma-4-31b-it:free",
+    id: "google-ai-studio/google/gemma-4-31b-it:free",
+    tier: "lightweight",
+    description: "Free Gemma",
+    pool: "google-ai-studio",
+    billing: "free",
+    status: "ready",
+  };
+
+  const onWatch: OnWatchClient = {
+    async getRoute(opts): Promise<RouteResponse> {
+      seenOpts.push(opts);
+      return {
+        tiers: {
+          lightweight: [NVIDIA, freeGemma],
+          workhorse: [GOOGLE],
+        },
+      };
+    },
+    async postFeedback() {},
+  };
+
+  const jev: JevClient = {
+    async classify(input) {
+      for (const list of Object.values(input.candidatesByTier)) {
+        for (const c of list ?? []) seenCandidates.push(c.id);
+      }
+      return { tier: "workhorse", effort: "medium", candidate: GOOGLE };
+    },
+  };
+
+  const res = await routePiTurn({
+    prompt: "Quick edit",
+    ctx: ctx as any,
+    deps: { onWatch, jev, state, pi: pi as any },
+  });
+
+  assert.equal(seenOpts[0].excludeFree, true);
+  assert.equal(seenOpts[0].pool, undefined);
+  assert.deepEqual(seenCandidates, ["openrouter/@preset/code-google"]);
+  assert.equal(res.action, "switched");
+  assert.equal(res.candidate?.id, "openrouter/@preset/code-google");
 });

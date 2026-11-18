@@ -1,15 +1,98 @@
 package routing
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+// T3Harnesses lists the coding harnesses available in T3 Code.
+var T3Harnesses = []string{
+	"pi",
+	"antigravity",
+	"cursor",
+	"grok",
+	"claudeAgent",
+	"codex",
+	"opencode",
+}
+
+// ValidHarness reports whether h is an available T3 coding harness.
+func ValidHarness(h string) bool {
+	norm := strings.TrimSpace(h)
+	for _, v := range T3Harnesses {
+		if strings.EqualFold(v, norm) {
+			return true
+		}
+	}
+	return false
+}
+
+// GenerateOpenRouterModel maps a BYOK provider model name to an OpenRouter model identifier.
+func GenerateOpenRouterModel(provider, modelID string) string {
+	model := strings.TrimSpace(modelID)
+	if model == "" {
+		return ""
+	}
+	// If already in provider/model or vendor/model form with a slash, keep it
+	if strings.Contains(model, "/") {
+		return model
+	}
+	p := strings.ToLower(strings.TrimSpace(provider))
+	switch {
+	case strings.Contains(p, "google") || p == "gemini":
+		return "google/" + model
+	case strings.Contains(p, "xai") || strings.Contains(p, "grok"):
+		return "x-ai/" + model
+	case strings.Contains(p, "nvidia"):
+		return "nvidia/" + model
+	case strings.Contains(p, "anthropic") || strings.Contains(p, "claude"):
+		return "anthropic/" + model
+	case strings.Contains(p, "openai") || strings.Contains(p, "codex") || strings.Contains(p, "chatgpt"):
+		return "openai/" + model
+	case strings.Contains(p, "deepseek"):
+		return "deepseek/" + model
+	case strings.Contains(p, "moonshot") || strings.Contains(p, "kimi"):
+		return "moonshotai/" + model
+	case strings.Contains(p, "chutes"):
+		return "chutes/" + model
+	default:
+		if p != "" && p != "openrouter" {
+			return p + "/" + model
+		}
+		return model
+	}
+}
+
+// StripOpenRouterPrefix strips known provider namespace prefixes from an OpenRouter model ID.
+func StripOpenRouterPrefix(modelID string) string {
+	m := strings.TrimSpace(modelID)
+	if m == "" {
+		return ""
+	}
+	prefixes := []string{"google/", "x-ai/", "nvidia/", "anthropic/", "openai/", "deepseek/", "moonshotai/", "chutes/"}
+	for _, p := range prefixes {
+		if strings.HasPrefix(m, p) {
+			return strings.TrimPrefix(m, p)
+		}
+	}
+	if idx := strings.Index(m, "/"); idx != -1 {
+		return m[idx+1:]
+	}
+	return m
+}
 
 // PoolCategory defines the economy category of a quota pool.
 type PoolCategory string
 
 const (
-	CategoryFree              PoolCategory = "free"
+	CategoryFree         PoolCategory = "free"
+	CategorySubscription PoolCategory = "subscription"
+	CategoryAllowance    PoolCategory = "allowance"
+	CategoryPAYG         PoolCategory = "payg"
+
+	// Legacy aliases for backward compatibility.
 	CategoryMonthlyCooldown   PoolCategory = "monthly_cooldown"
 	CategoryMonthlyNoCooldown PoolCategory = "monthly_no_cooldown"
-	CategoryPAYG              PoolCategory = "payg"
 )
 
 // Tier defines the 3-tier model capability classification.
@@ -24,10 +107,27 @@ const (
 // AllTiers lists tiers from highest capability to lowest.
 var AllTiers = []Tier{TierFrontier, TierWorkhorse, TierLightweight}
 
+// NormalizeCategory normalizes legacy category names to subscription/allowance.
+func NormalizeCategory(c PoolCategory) PoolCategory {
+	switch c {
+	case CategoryMonthlyCooldown, CategorySubscription:
+		return CategorySubscription
+	case CategoryMonthlyNoCooldown, CategoryAllowance:
+		return CategoryAllowance
+	case CategoryFree:
+		return CategoryFree
+	case CategoryPAYG:
+		return CategoryPAYG
+	default:
+		return c
+	}
+}
+
 // ValidCategory reports whether c is a recognized pool category.
 func ValidCategory(c PoolCategory) bool {
-	switch c {
-	case CategoryFree, CategoryMonthlyCooldown, CategoryMonthlyNoCooldown, CategoryPAYG:
+	norm := NormalizeCategory(c)
+	switch norm {
+	case CategoryFree, CategorySubscription, CategoryAllowance, CategoryPAYG:
 		return true
 	default:
 		return false
@@ -46,22 +146,38 @@ func ValidTier(t Tier) bool {
 
 // Pool represents a real billing/quota account tracked by onWatch.
 type Pool struct {
-	ID          string       `json:"id"`
-	DisplayName string       `json:"display_name"`
-	Category    PoolCategory `json:"category"`
-	Enabled     bool         `json:"enabled"`
-	CapUSD      float64      `json:"cap_usd"`
-	ReserveUSD  float64      `json:"reserve_usd"`
-	SpentUSD    float64      `json:"spent_usd"`
-	ResetDay    int          `json:"reset_day"`
-	ExpiresAt   *time.Time   `json:"expires_at,omitempty"`
-	WindowHours int          `json:"window_hours"`
-	PaceSlack   float64      `json:"pace_slack"`
-	Weight      int          `json:"weight"`
-	ProbeSource string       `json:"probe_source"`
-	CycleStart  *time.Time   `json:"cycle_start,omitempty"`
-	Notes       string       `json:"notes,omitempty"`
-	UpdatedAt   time.Time    `json:"updated_at"`
+	ID               string       `json:"id"`
+	DisplayName      string       `json:"display_name"`
+	Category         PoolCategory `json:"category"`
+	Enabled          bool         `json:"enabled"`
+	CapUSD           float64      `json:"cap_usd"`
+	ReserveUSD       float64      `json:"reserve_usd"`
+	SpentUSD         float64      `json:"spent_usd"`
+	ResetDay         int          `json:"reset_day"`
+	ResetCycle       string       `json:"reset_cycle,omitempty"`        // "daily", "weekly", "monthly"
+	InnerWindowHours int          `json:"inner_window_hours,omitempty"` // e.g. 5 for 5h rolling window
+	ExpiresAt        *time.Time   `json:"expires_at,omitempty"`
+	WindowHours      int          `json:"window_hours"`
+	PaceSlack        float64      `json:"pace_slack"`
+	Weight           int          `json:"weight"`
+	ProbeSource      string       `json:"probe_source"`
+	CycleStart       *time.Time   `json:"cycle_start,omitempty"`
+	RoutingProvider  string       `json:"routing_provider,omitempty"` // e.g. "openrouter" or ""
+	InputCostPer1M   float64      `json:"input_cost_per_1m"`
+	OutputCostPer1M  float64      `json:"output_cost_per_1m"`
+	Notes            string       `json:"notes,omitempty"`
+	UpdatedAt        time.Time    `json:"updated_at"`
+}
+
+// IsBuiltinPool reports whether the pool's category is locked to a built-in integration probe.
+func (p Pool) IsBuiltinPool() bool {
+	switch p.ProbeSource {
+	case "antigravity_3p", "antigravity_argon", "antigravity_gemini", "antigravity_flash", "grok",
+		"anthropic", "codex", "cursor", "chutes", "openrouter", "google_ai_studio", "feedback_health":
+		return true
+	default:
+		return false
+	}
 }
 
 // RouteModel represents an enabled/configured model route inside a pool & tier.
@@ -256,10 +372,11 @@ type TierFallback struct {
 
 // RouteOptions controls route selection for GET /api/route.
 type RouteOptions struct {
-	Harnesses  []string
-	Tier       Tier
-	StickyPool string
-	Exclude    []string
+	Harnesses   []string
+	Tier        Tier
+	StickyPool  string
+	Exclude     []string
+	ExcludeFree bool
 }
 
 // RouteResponse is returned by GET /api/route.

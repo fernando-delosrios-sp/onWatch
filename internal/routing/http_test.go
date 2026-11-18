@@ -27,6 +27,18 @@ func TestHTTPHandlersEndToEnd(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("GET %s returned %d", path, rr.Code)
 		}
+		body := rr.Body.String()
+		if path == "/routing" {
+			if !strings.Contains(body, `<option value="" selected>All harnesses</option>`) {
+				t.Fatalf("expected /routing to default #harness-preview-select to All harnesses")
+			}
+			if strings.Contains(body, `pi + all native`) || strings.Contains(body, `native CLIs only`) {
+				t.Fatalf("expected /routing not to contain hardcoded harness preset options")
+			}
+		}
+		if path == "/routing/assets/routing.js" && !strings.Contains(body, "populateHarnessPreviewSelect") {
+			t.Fatalf("expected routing.js to define populateHarnessPreviewSelect")
+		}
 	}
 
 	// 2. GET /api/route?harnesses=pi,cursor,antigravity,grok,claudeAgent,codex
@@ -43,15 +55,15 @@ func TestHTTPHandlersEndToEnd(t *testing.T) {
 	if len(routeResp.Pools) != 11 {
 		t.Fatalf("expected 11 pools, got %d", len(routeResp.Pools))
 	}
-	if !routeResp.TierSelections[TierWorkhorse].Available || routeResp.TierSelections[TierWorkhorse].Pool != "nvidia-free" {
-		t.Fatalf("expected workhorse nvidia-free, got %+v", routeResp.TierSelections[TierWorkhorse])
+	if !routeResp.TierSelections[TierLightweight].Available || routeResp.TierSelections[TierLightweight].Pool != "nvidia-free" {
+		t.Fatalf("expected lightweight nvidia-free, got %+v", routeResp.TierSelections[TierLightweight])
 	}
-	if len(routeResp.Tiers[TierWorkhorse]) == 0 || routeResp.Tiers[TierWorkhorse][0].ID != "openrouter/@preset/code-nvidia" {
-		t.Fatalf("expected pi preset normalized candidate in Tiers[workhorse], got %+v", routeResp.Tiers[TierWorkhorse])
+	if len(routeResp.Tiers[TierLightweight]) == 0 || routeResp.Tiers[TierLightweight][0].ID != "openrouter/nvidia/nemotron-3.5-lightning:free" {
+		t.Fatalf("expected exact nemotron candidate in Tiers[lightweight], got %+v", routeResp.Tiers[TierLightweight])
 	}
 
 	// 2b. GET /api/route with tier, pool, exclude
-	piReq := httptest.NewRequest(http.MethodGet, "/api/route?harnesses=pi&tier=workhorse&exclude=openrouter/@preset/code-nvidia", nil)
+	piReq := httptest.NewRequest(http.MethodGet, "/api/route?harnesses=pi&tier=lightweight&exclude=openrouter/nvidia/nemotron-3.5-lightning:free", nil)
 	piRR := httptest.NewRecorder()
 	mux.ServeHTTP(piRR, piReq)
 	if piRR.Code != http.StatusOK {
@@ -61,8 +73,30 @@ func TestHTTPHandlersEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(piRR.Body.Bytes(), &piResp); err != nil {
 		t.Fatal(err)
 	}
-	if len(piResp.Tiers) != 1 || len(piResp.Tiers[TierWorkhorse]) == 0 || piResp.Tiers[TierWorkhorse][0].Pool == "nvidia-free" {
-		t.Fatalf("expected filtered workhorse excluding nvidia-free, got %+v", piResp.Tiers)
+	if len(piResp.Tiers) != 1 || len(piResp.Tiers[TierLightweight]) == 0 || piResp.Tiers[TierLightweight][0].Model == "nvidia/nemotron-3.5-lightning:free" {
+		t.Fatalf("expected filtered lightweight excluding lightning:free, got %+v", piResp.Tiers)
+	}
+
+	// 2c. GET /api/route?harnesses=pi&exclude_free=true skips all free pools & free models
+	noFreeReq := httptest.NewRequest(http.MethodGet, "/api/route?harnesses=pi&exclude_free=true", nil)
+	noFreeRR := httptest.NewRecorder()
+	mux.ServeHTTP(noFreeRR, noFreeReq)
+	if noFreeRR.Code != http.StatusOK {
+		t.Fatalf("GET /api/route exclude_free=true returned %d: %s", noFreeRR.Code, noFreeRR.Body.String())
+	}
+	var noFreeResp RouteResponse
+	if err := json.Unmarshal(noFreeRR.Body.Bytes(), &noFreeResp); err != nil {
+		t.Fatal(err)
+	}
+	for _, tier := range AllTiers {
+		if noFreeResp.TierSelections[tier].Pool == "nvidia-free" {
+			t.Fatalf("expected tier %s to skip nvidia-free with exclude_free=true", tier)
+		}
+		for _, c := range noFreeResp.Tiers[tier] {
+			if c.Billing == "free" || c.Overlay == "@preset/code-nvidia" {
+				t.Fatalf("expected no free candidate in tier %s, got %+v", tier, c)
+			}
+		}
 	}
 
 	// 3. POST /api/route/feedback (linear-t3-dispatcher payload shape)
@@ -75,7 +109,7 @@ func TestHTTPHandlersEndToEnd(t *testing.T) {
 	}
 
 	// 3b. POST /api/route/feedback (pi-onwatch-jev camelCase payload without explicit pool)
-	piFB := `{"harness":"pi","provider":"openrouter","model":"@preset/code-google","outcome":"demoted","statusCode":500,"ttftMs":310,"latencyMs":920,"reason":"user ran /bad"}`
+	piFB := `{"harness":"pi","provider":"openrouter","model":"google/gemini-4-hydrogen","outcome":"demoted","statusCode":500,"ttftMs":310,"latencyMs":920,"reason":"user ran /bad"}`
 	piFBReq := httptest.NewRequest(http.MethodPost, "/api/route/feedback", strings.NewReader(piFB))
 	piFBRR := httptest.NewRecorder()
 	mux.ServeHTTP(piFBRR, piFBReq)
@@ -104,12 +138,24 @@ func TestHTTPHandlersEndToEnd(t *testing.T) {
 	}
 
 	// 5. PUT /api/routing/pools/google-ai-studio
-	poolUpdate := `{"display_name":"Google AI Studio","category":"monthly_no_cooldown","enabled":true,"cap_usd":20,"reserve_usd":2,"spent_usd":3.5,"reset_day":1,"pace_slack":0.15,"weight":99}`
+	poolUpdate := `{"display_name":"Google AI Studio","category":"allowance","enabled":true,"cap_usd":20,"reserve_usd":2,"spent_usd":3.5,"reset_day":1,"reset_cycle":"monthly","pace_slack":0.15,"weight":99}`
 	pReq := httptest.NewRequest(http.MethodPut, "/api/routing/pools/google-ai-studio", strings.NewReader(poolUpdate))
 	pRR := httptest.NewRecorder()
 	mux.ServeHTTP(pRR, pReq)
 	if pRR.Code != http.StatusOK {
 		t.Fatalf("PUT pool returned %d: %s", pRR.Code, pRR.Body.String())
+	}
+
+	// 5b. POST /api/routing/pools/google-ai-studio/reset-cycle
+	rcReq := httptest.NewRequest(http.MethodPost, "/api/routing/pools/google-ai-studio/reset-cycle", nil)
+	rcRR := httptest.NewRecorder()
+	mux.ServeHTTP(rcRR, rcReq)
+	if rcRR.Code != http.StatusOK {
+		t.Fatalf("POST reset-cycle returned %d: %s", rcRR.Code, rcRR.Body.String())
+	}
+	pGoogle, _ := svc.Store.GetPool("google-ai-studio")
+	if pGoogle.SpentUSD != 0 {
+		t.Fatalf("expected spent_usd reset to 0, got %f", pGoogle.SpentUSD)
 	}
 
 	// 6. POST /api/routing/models -> PUT -> DELETE

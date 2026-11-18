@@ -103,7 +103,8 @@ type Config struct {
 	MiniMaxRegion string // MINIMAX_REGION ( "global" | "cn", default: "global" )
 
 	// OpenRouter provider configuration
-	OpenRouterAPIKey string // OPENROUTER_API_KEY
+	OpenRouterAPIKey        string // OPENROUTER_API_KEY
+	OpenRouterManagementKey string // OPENROUTER_MANAGEMENT_KEY
 
 	// Moonshot provider configuration
 	MoonshotAPIKey  string // MOONSHOT_API_KEY
@@ -112,6 +113,21 @@ type Config struct {
 	// DeepSeek provider configuration
 	DeepSeekAPIKey  string // DEEPSEEK_API_KEY
 	DeepSeekBaseURL string // DEEPSEEK_BASE_URL override for proxy setups (default https://api.deepseek.com)
+
+	// Chutes provider configuration
+	ChutesAPIKey    string // CHUTES_API_KEY
+	ChutesBaseURL   string // CHUTES_BASE_URL (default https://api.chutes.ai)
+	ChutesModelsURL string // CHUTES_MODELS_URL (default https://llm.chutes.ai/v1/models)
+
+	// NVIDIA NIM provider configuration
+	NvidiaAPIKey  string // NVIDIA_API_KEY
+	NvidiaBaseURL string // NVIDIA_BASE_URL (default https://integrate.api.nvidia.com)
+
+	// Google AI Studio provider configuration
+	GoogleAIStudioAPIKey  string  // GOOGLE_AI_STUDIO_API_KEY or GEMINI_API_KEY
+	GoogleAIStudioBaseURL string  // GOOGLE_AI_STUDIO_BASE_URL (default https://generativelanguage.googleapis.com)
+	GoogleAIStudioProject string  // GOOGLE_CLOUD_PROJECT (optional GCP Cloud Monitoring project)
+	GoogleAIStudioCapUSD  float64 // GOOGLE_AI_STUDIO_CAP_USD (default 15.0)
 
 	// Gemini provider configuration (auto-detected from ~/.gemini/oauth_creds.json or env vars)
 	GeminiEnabled      bool   // true if auto-detected or GEMINI_ENABLED=true
@@ -364,10 +380,21 @@ var onwatchEnvKeys = []string{
 	"ANTIGRAVITY_ENABLED",
 	"MINIMAX_API_KEY",
 	"OPENROUTER_API_KEY",
+	"OPENROUTER_MANAGEMENT_KEY",
 	"MOONSHOT_API_KEY",
 	"MOONSHOT_BASE_URL",
 	"DEEPSEEK_API_KEY",
 	"DEEPSEEK_BASE_URL",
+	"CHUTES_API_KEY",
+	"CHUTES_BASE_URL",
+	"CHUTES_MODELS_URL",
+	"NVIDIA_API_KEY",
+	"NVIDIA_BASE_URL",
+	"GOOGLE_AI_STUDIO_API_KEY",
+	"GEMINI_API_KEY",
+	"GOOGLE_AI_STUDIO_BASE_URL",
+	"GOOGLE_CLOUD_PROJECT",
+	"GOOGLE_AI_STUDIO_CAP_USD",
 	"CURSOR_TOKEN",
 	"GROK_TOKEN",
 	"GROK_ENABLED",
@@ -538,6 +565,7 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 
 	// OpenRouter provider
 	cfg.OpenRouterAPIKey = strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+	cfg.OpenRouterManagementKey = strings.TrimSpace(os.Getenv("OPENROUTER_MANAGEMENT_KEY"))
 
 	// Moonshot provider
 	cfg.MoonshotAPIKey = strings.TrimSpace(os.Getenv("MOONSHOT_API_KEY"))
@@ -546,6 +574,29 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 	// DeepSeek provider
 	cfg.DeepSeekAPIKey = strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
 	cfg.DeepSeekBaseURL = strings.TrimSpace(os.Getenv("DEEPSEEK_BASE_URL"))
+
+	// Chutes provider
+	cfg.ChutesAPIKey = strings.TrimSpace(os.Getenv("CHUTES_API_KEY"))
+	cfg.ChutesBaseURL = strings.TrimSpace(os.Getenv("CHUTES_BASE_URL"))
+	cfg.ChutesModelsURL = strings.TrimSpace(os.Getenv("CHUTES_MODELS_URL"))
+
+	// NVIDIA NIM provider
+	cfg.NvidiaAPIKey = strings.TrimSpace(os.Getenv("NVIDIA_API_KEY"))
+	cfg.NvidiaBaseURL = strings.TrimSpace(os.Getenv("NVIDIA_BASE_URL"))
+
+	// Google AI Studio provider
+	cfg.GoogleAIStudioAPIKey = strings.TrimSpace(os.Getenv("GOOGLE_AI_STUDIO_API_KEY"))
+	if cfg.GoogleAIStudioAPIKey == "" {
+		cfg.GoogleAIStudioAPIKey = strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+	}
+	cfg.GoogleAIStudioBaseURL = strings.TrimSpace(os.Getenv("GOOGLE_AI_STUDIO_BASE_URL"))
+	cfg.GoogleAIStudioProject = strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_PROJECT"))
+	cfg.GoogleAIStudioCapUSD = 15.0
+	if capStr := strings.TrimSpace(os.Getenv("GOOGLE_AI_STUDIO_CAP_USD")); capStr != "" {
+		if v, err := strconv.ParseFloat(capStr, 64); err == nil && v > 0 {
+			cfg.GoogleAIStudioCapUSD = v
+		}
+	}
 
 	// Gemini provider (auto-detected, env vars, or opt-out via GEMINI_ENABLED=false)
 	cfg.GeminiRefreshToken = strings.TrimSpace(os.Getenv("GEMINI_REFRESH_TOKEN"))
@@ -942,6 +993,15 @@ func (c *Config) availableProvidersLocked() []string {
 	if c.DeepSeekAPIKey != "" {
 		providers = append(providers, "deepseek")
 	}
+	if c.ChutesAPIKey != "" {
+		providers = append(providers, "chutes")
+	}
+	if c.NvidiaAPIKey != "" {
+		providers = append(providers, "nvidia")
+	}
+	if c.GoogleAIStudioAPIKey != "" || c.GoogleAIStudioProject != "" {
+		providers = append(providers, "googleaistudio")
+	}
 	if c.GeminiEnabled {
 		providers = append(providers, "gemini")
 	}
@@ -1017,6 +1077,12 @@ func (c *Config) hasProviderLocked(name string) bool {
 		return c.MoonshotAPIKey != ""
 	case "deepseek":
 		return c.DeepSeekAPIKey != ""
+	case "chutes":
+		return c.ChutesAPIKey != ""
+	case "nvidia":
+		return c.NvidiaAPIKey != ""
+	case "googleaistudio":
+		return c.GoogleAIStudioAPIKey != "" || c.GoogleAIStudioProject != ""
 	case "gemini":
 		return c.GeminiEnabled
 	case "cursor":
@@ -1171,6 +1237,9 @@ func (c *Config) String() string {
 	// Redact DeepSeek token
 	deepseekDisplay := redactAPIKey(c.DeepSeekAPIKey, "")
 	fmt.Fprintf(&sb, "  DeepSeekAPIKey: %s,\n", deepseekDisplay)
+	fmt.Fprintf(&sb, "  ChutesAPIKey: %s,\n", redactAPIKey(c.ChutesAPIKey, ""))
+	fmt.Fprintf(&sb, "  NvidiaAPIKey: %s,\n", redactAPIKey(c.NvidiaAPIKey, ""))
+	fmt.Fprintf(&sb, "  GoogleAIStudioAPIKey: %s,\n", redactAPIKey(c.GoogleAIStudioAPIKey, ""))
 
 	fmt.Fprintf(&sb, "  APIIntegrationsEnabled: %v,\n", c.APIIntegrationsEnabled)
 	fmt.Fprintf(&sb, "  APIIntegrationsDir: %s,\n", c.APIIntegrationsDir)

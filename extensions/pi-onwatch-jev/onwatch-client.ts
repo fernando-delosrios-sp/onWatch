@@ -216,6 +216,23 @@ export function normalizeCandidate(raw: unknown, defaultTier: Tier = "workhorse"
       : `${harness} ${provider}/${model}`;
 
   const pool = typeof r.pool === "string" && r.pool.trim() ? r.pool.trim() : undefined;
+  const overlay = typeof r.overlay === "string" && r.overlay.trim() ? r.overlay.trim() : undefined;
+  const billing = typeof r.billing === "string" && r.billing.trim() ? r.billing.trim() : undefined;
+  const rawUnderlyingModel =
+    typeof r.underlyingModel === "string"
+      ? r.underlyingModel
+      : typeof r.underlying_model === "string"
+        ? r.underlying_model
+        : undefined;
+  const underlyingModel = rawUnderlyingModel?.trim() || undefined;
+  const rawUnderlyingList = Array.isArray(r.underlyingModels)
+    ? r.underlyingModels
+    : Array.isArray(r.underlying_models)
+      ? r.underlying_models
+      : undefined;
+  const underlyingModels = rawUnderlyingList
+    ? rawUnderlyingList.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim())
+    : undefined;
   const weight = typeof r.weight === "number" && Number.isFinite(r.weight) ? r.weight : undefined;
 
   const capsRaw = r.capabilities && typeof r.capabilities === "object" ? (r.capabilities as Record<string, unknown>) : undefined;
@@ -237,41 +254,151 @@ export function normalizeCandidate(raw: unknown, defaultTier: Tier = "workhorse"
     tier,
     description,
     pool,
+    overlay,
+    billing,
+    underlyingModel,
+    underlyingModels,
     status,
     weight,
     capabilities,
   };
 }
 
-export function normalizeRouteResponse(raw: unknown): RouteResponse {
+export function isFreeRouteCandidate(
+  candidate: Pick<RouteCandidate, "provider" | "model" | "id" | "pool" | "overlay" | "billing" | "underlyingModel" | "underlyingModels">,
+): boolean {
+  const billing = candidate.billing?.trim().toLowerCase();
+  if (billing === "free") return true;
+
+  const pool = candidate.pool?.trim().toLowerCase();
+  if (pool === "nvidia-free" || pool === "nvidia") return true;
+
+  const overlay = candidate.overlay?.trim().toLowerCase();
+  if (overlay === "@preset/code-nvidia" || overlay === "@preset/code-fast-free") return true;
+
+  const model = candidate.model.trim().toLowerCase();
+  const id = candidate.id.trim().toLowerCase();
+  if (
+    model === "@preset/code-nvidia" ||
+    id === "openrouter/@preset/code-nvidia" ||
+    model === "@preset/code-fast-free" ||
+    id === "openrouter/@preset/code-fast-free" ||
+    model === "openrouter/free" ||
+    id === "openrouter/free" ||
+    model.endsWith(":free") ||
+    id.endsWith(":free")
+  ) {
+    return true;
+  }
+
+  if (candidate.underlyingModels && candidate.underlyingModels.length > 0) {
+    return candidate.underlyingModels.every((m) => m.trim().toLowerCase().endsWith(":free"));
+  }
+  if (candidate.underlyingModel && candidate.underlyingModel.trim().toLowerCase().endsWith(":free")) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeFallbackOverlayGroup(candidates: RouteCandidate[]): RouteCandidate[] {
+  const out: RouteCandidate[] = [];
+  const byId = new Map<string, RouteCandidate>();
+
+  for (const c of candidates) {
+    const norm: RouteCandidate = { ...c };
+    if (norm.harness === "pi" && norm.overlay && norm.overlay.startsWith("@preset/")) {
+      const underlying = norm.underlyingModel ?? norm.model;
+      norm.underlyingModel = underlying;
+      norm.underlyingModels = norm.underlyingModels?.length ? [...norm.underlyingModels] : [underlying];
+      norm.provider = "openrouter";
+      norm.model = norm.overlay;
+      norm.id = `openrouter/${norm.overlay}`;
+    }
+
+    const existing = byId.get(norm.id);
+    if (existing) {
+      if (norm.underlyingModel) {
+        existing.underlyingModels = [...(existing.underlyingModels ?? []), norm.underlyingModel];
+      }
+      if (norm.description && !existing.description.includes(norm.description)) {
+        existing.description = existing.description ? `${existing.description}; ${norm.description}` : norm.description;
+      }
+      continue;
+    }
+
+    byId.set(norm.id, norm);
+    out.push(norm);
+  }
+  return out;
+}
+
+export function normalizeRouteResponse(raw: unknown, options?: { excludeFree?: boolean }): RouteResponse {
   if (!raw || typeof raw !== "object") {
     throw new Error("Invalid /api/route JSON payload");
   }
   const obj = raw as Record<string, unknown>;
   const tiers: Partial<Record<Tier, RouteCandidate[]>> = {};
+  const excludeFree = Boolean(options?.excludeFree);
 
   if (obj.tiers && typeof obj.tiers === "object" && !Array.isArray(obj.tiers)) {
     const rawTiers = obj.tiers as Record<string, unknown>;
+    const rawSelections =
+      obj.tier_selections && typeof obj.tier_selections === "object" && !Array.isArray(obj.tier_selections)
+        ? (obj.tier_selections as Record<string, unknown>)
+        : undefined;
+
     for (const tier of TIERS) {
       const list = rawTiers[tier];
-      if (!Array.isArray(list)) continue;
-      const normalized = list
-        .map((item) => normalizeCandidate(item, tier))
-        .filter((item): item is RouteCandidate => Boolean(item));
+      let normalized = Array.isArray(list)
+        ? list
+            .map((item) => normalizeCandidate(item, tier))
+            .filter((item): item is RouteCandidate => Boolean(item))
+        : [];
+      if (excludeFree) {
+        normalized = normalized.filter((item) => !isFreeRouteCandidate(item));
+        if (normalized.length === 0 && rawSelections) {
+          const sel = rawSelections[tier];
+          const fallbacks =
+            sel && typeof sel === "object" && Array.isArray((sel as Record<string, unknown>).fallbacks)
+              ? ((sel as Record<string, unknown>).fallbacks as unknown[])
+              : [];
+          for (const fb of fallbacks) {
+            if (!fb || typeof fb !== "object") continue;
+            const fbObj = fb as Record<string, unknown>;
+            if (typeof fbObj.category === "string" && fbObj.category.toLowerCase() === "free") continue;
+            const fbList = Array.isArray(fbObj.candidates) ? fbObj.candidates : [];
+            const fbCandidates = normalizeFallbackOverlayGroup(
+              fbList
+                .map((item) => normalizeCandidate(item, tier))
+                .filter((item): item is RouteCandidate => Boolean(item) && !isFreeRouteCandidate(item)),
+            );
+            if (fbCandidates.length > 0) {
+              normalized = fbCandidates;
+              break;
+            }
+          }
+        }
+      }
       if (normalized.length > 0) tiers[tier] = normalized;
     }
   } else if (Array.isArray(obj.candidates)) {
     for (const item of obj.candidates) {
       const normalized = normalizeCandidate(item, "workhorse");
       if (!normalized) continue;
+      if (excludeFree && isFreeRouteCandidate(normalized)) continue;
       tiers[normalized.tier] ??= [];
       tiers[normalized.tier]!.push(normalized);
     }
   }
 
+  let stickyPool = typeof obj.stickyPool === "string" && obj.stickyPool.trim() ? obj.stickyPool.trim() : undefined;
+  if (excludeFree && (stickyPool === "nvidia-free" || stickyPool === "nvidia")) {
+    stickyPool = undefined;
+  }
+
   return {
     tiers,
-    stickyPool: typeof obj.stickyPool === "string" && obj.stickyPool.trim() ? obj.stickyPool.trim() : undefined,
+    stickyPool,
     stale: typeof obj.stale === "boolean" ? obj.stale : undefined,
     reason: typeof obj.reason === "string" && obj.reason.trim() ? obj.reason.trim() : undefined,
   };
@@ -311,6 +438,9 @@ export class HttpOnWatchClient implements OnWatchClient {
     if (options.exclude && options.exclude.length > 0) {
       params.set("exclude", options.exclude.join(","));
     }
+    if (options.excludeFree) {
+      params.set("exclude_free", "true");
+    }
 
     const url = `${this.baseUrl}/api/route?${params.toString()}`;
     const headers: Record<string, string> = { accept: "application/json" };
@@ -340,7 +470,7 @@ export class HttpOnWatchClient implements OnWatchClient {
     }
 
     try {
-      return normalizeRouteResponse(body);
+      return normalizeRouteResponse(body, { excludeFree: options.excludeFree });
     } catch (err) {
       throw new OnWatchError(
         "invalid",

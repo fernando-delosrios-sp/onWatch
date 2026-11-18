@@ -147,11 +147,13 @@ test("HttpOnWatchClient sends query params, basic auth, and feedback", async () 
     harnesses: ["pi"],
     pool: "google",
     exclude: ["openrouter/@preset/code-xai"],
+    excludeFree: true,
   });
   assert.equal(route.tiers.workhorse?.[0].pool, "google");
   assert.ok(calls[0].url.includes("harnesses=pi"));
   assert.ok(calls[0].url.includes("pool=google"));
   assert.ok(calls[0].url.includes("exclude=openrouter%2F%40preset%2Fcode-xai"));
+  assert.ok(calls[0].url.includes("exclude_free=true"));
   const headers = calls[0].init.headers as Record<string, string>;
   assert.equal(headers.authorization, `Basic ${Buffer.from("admin:pw").toString("base64")}`);
 
@@ -188,4 +190,62 @@ test("HttpOnWatchClient maps network failures and 401s to typed OnWatchError", a
     () => downClient.getRoute({ harnesses: ["pi"] }),
     (err: unknown) => err instanceof OnWatchError && err.kind === "unreachable",
   );
+});
+
+test("normalizeRouteResponse with excludeFree promotes non-free tier_selections fallback", () => {
+  const normalized = normalizeRouteResponse(
+    {
+      stickyPool: "nvidia-free",
+      tiers: {
+        lightweight: [
+          {
+            id: "openrouter/@preset/code-nvidia",
+            tier: "lightweight",
+            harness: "pi",
+            provider: "openrouter",
+            model: "@preset/code-nvidia",
+            overlay: "@preset/code-nvidia",
+            pool: "nvidia-free",
+            billing: "free",
+            status: "ready",
+          },
+        ],
+      },
+      tier_selections: {
+        lightweight: {
+          tier: "lightweight",
+          available: true,
+          pool: "nvidia-free",
+          fallbacks: [
+            {
+              pool: "xai",
+              category: "subscription",
+              harness: "pi",
+              provider: "openrouter",
+              overlay: "@preset/code-xai",
+              candidates: [
+                {
+                  id: "openrouter/x-ai/grok-build-0.1",
+                  tier: "lightweight",
+                  model: "x-ai/grok-build-0.1",
+                  pool: "xai",
+                  harness: "pi",
+                  provider: "openrouter",
+                  overlay: "@preset/code-xai",
+                  billing: "byok",
+                  status: "ready",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    { excludeFree: true },
+  );
+
+  assert.equal(normalized.stickyPool, undefined);
+  assert.equal(normalized.tiers.lightweight?.length, 1);
+  assert.equal(normalized.tiers.lightweight?.[0].id, "openrouter/@preset/code-xai");
+  assert.equal(normalized.tiers.lightweight?.[0].pool, "xai");
 });

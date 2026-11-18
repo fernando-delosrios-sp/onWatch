@@ -117,7 +117,10 @@ type Handler struct {
 	geminiTracker      *tracker.GeminiTracker
 	openrouterTracker  *tracker.OpenRouterTracker
 	moonshotTracker    *tracker.MoonshotTracker
-	deepseekTracker    *tracker.DeepSeekTracker
+	deepseekTracker       *tracker.DeepSeekTracker
+	chutesTracker         *tracker.ChutesTracker
+	nvidiaTracker         *tracker.NvidiaTracker
+	googleAIStudioTracker *tracker.GoogleAIStudioTracker
 	cursorTracker      *tracker.CursorTracker
 	grokTracker        *tracker.GrokTracker
 	kimiTracker        *tracker.KimiTracker
@@ -924,6 +927,21 @@ func (h *Handler) SetDeepSeekTracker(t *tracker.DeepSeekTracker) {
 	h.deepseekTracker = t
 }
 
+// SetChutesTracker sets the Chutes tracker for usage summary enrichment.
+func (h *Handler) SetChutesTracker(t *tracker.ChutesTracker) {
+	h.chutesTracker = t
+}
+
+// SetNvidiaTracker sets the NVIDIA NIM tracker for usage summary enrichment.
+func (h *Handler) SetNvidiaTracker(t *tracker.NvidiaTracker) {
+	h.nvidiaTracker = t
+}
+
+// SetGoogleAIStudioTracker sets the Google AI Studio tracker for usage summary enrichment.
+func (h *Handler) SetGoogleAIStudioTracker(t *tracker.GoogleAIStudioTracker) {
+	h.googleAIStudioTracker = t
+}
+
 // SetCursorTracker sets the Cursor tracker for usage summary enrichment.
 func (h *Handler) SetCursorTracker(t *tracker.CursorTracker) {
 	h.cursorTracker = t
@@ -1301,6 +1319,9 @@ func providerCatalog() []providerCatalogItem {
 		{Key: "openrouter", Name: "OpenRouter", Description: "OpenRouter credits usage tracking"},
 		{Key: "moonshot", Name: "Moonshot", Description: "Moonshot Kimi balance tracking"},
 		{Key: "deepseek", Name: "DeepSeek", Description: "DeepSeek API balance tracking"},
+		{Key: "chutes", Name: "Chutes", Description: "Chutes PAYG credit, usage & available models"},
+		{Key: "nvidia", Name: "NVIDIA NIM", Description: "NVIDIA NIM API models & rate limits"},
+		{Key: "googleaistudio", Name: "Google AI Studio", Description: "Google AI Studio models, GCP request count & voucher cap"},
 		{Key: "gemini", Name: "Gemini", Description: "Google Gemini CLI quota tracking", AutoDetectable: true},
 		{Key: "cursor", Name: "Cursor", Description: "Cursor usage and quota tracking", AutoDetectable: true},
 		{Key: "grok", Name: "Grok", Description: "Grok (xAI) usage tracking", AutoDetectable: true},
@@ -1372,6 +1393,12 @@ func (h *Handler) providerConfiguredFromConfig(provider string) (configured, nee
 		return strings.TrimSpace(h.config.MoonshotAPIKey) != "", false
 	case "deepseek":
 		return strings.TrimSpace(h.config.DeepSeekAPIKey) != "", false
+	case "chutes":
+		return strings.TrimSpace(h.config.ChutesAPIKey) != "", false
+	case "nvidia":
+		return strings.TrimSpace(h.config.NvidiaAPIKey) != "", false
+	case "googleaistudio":
+		return strings.TrimSpace(h.config.GoogleAIStudioAPIKey) != "" || strings.TrimSpace(h.config.GoogleAIStudioProject) != "", false
 	case "gemini":
 		return h.config.GeminiEnabled, false
 	case "cursor":
@@ -1733,6 +1760,11 @@ func applyProviderConfig(dst, src *config.Config) {
 	dst.OpenRouterAPIKey = src.OpenRouterAPIKey
 	dst.MoonshotAPIKey = src.MoonshotAPIKey
 	dst.DeepSeekAPIKey = src.DeepSeekAPIKey
+	dst.ChutesAPIKey = src.ChutesAPIKey
+	dst.NvidiaAPIKey = src.NvidiaAPIKey
+	dst.GoogleAIStudioAPIKey = src.GoogleAIStudioAPIKey
+	dst.GoogleAIStudioProject = src.GoogleAIStudioProject
+	dst.GoogleAIStudioCapUSD = src.GoogleAIStudioCapUSD
 	dst.GeminiEnabled = src.GeminiEnabled
 	dst.GeminiAutoToken = src.GeminiAutoToken
 	dst.GrokToken = src.GrokToken
@@ -1968,6 +2000,23 @@ func applyProviderSettingsLocked(st *store.Store, cfg *config.Config, logger *sl
 	}
 	if s := provSettings["deepseek"]; s != nil {
 		applySecret(&cfg.DeepSeekAPIKey, s, "api_key")
+	}
+	if s := provSettings["chutes"]; s != nil {
+		applySecret(&cfg.ChutesAPIKey, s, "api_key")
+	}
+	if s := provSettings["nvidia"]; s != nil {
+		applySecret(&cfg.NvidiaAPIKey, s, "api_key")
+	}
+	if s := provSettings["googleaistudio"]; s != nil {
+		applySecret(&cfg.GoogleAIStudioAPIKey, s, "api_key")
+		if proj, _ := s["project"].(string); strings.TrimSpace(proj) != "" {
+			setString(&cfg.GoogleAIStudioProject, strings.TrimSpace(proj))
+		} else if providerSettingIsCleared(s, "project") {
+			setString(&cfg.GoogleAIStudioProject, "")
+		}
+		if capVal, ok := s["cap_usd"].(float64); ok && capVal > 0 {
+			cfg.GoogleAIStudioCapUSD = capVal
+		}
 	}
 	if s := provSettings["antigravity"]; s != nil {
 		if url, _ := s["base_url"].(string); url != "" {
@@ -2332,6 +2381,8 @@ var providerRestartFields = map[string]bool{
 	"model":           true,
 	"monthly_limit":   true,
 	"reset_day":       true,
+	"project":         true,
+	"cap_usd":         true,
 }
 
 // providerRuntimeRestartable lists providers whose agent factory builds a fresh
@@ -2340,9 +2391,12 @@ var providerRestartFields = map[string]bool{
 // them a restart would run two copies of the same agent and re-read nothing, so
 // changes keep applying on the next daemon restart (as before).
 var providerRuntimeRestartable = map[string]bool{
-	"opencode": true,
-	"mistral":  true,
-	"zenmux":   true,
+	"opencode":       true,
+	"mistral":        true,
+	"zenmux":         true,
+	"chutes":         true,
+	"nvidia":         true,
+	"googleaistudio": true,
 }
 
 // providerSettingsNeedRestart reports which providers in a saved
@@ -2695,6 +2749,12 @@ func (h *Handler) Current(w http.ResponseWriter, r *http.Request) {
 		h.currentMoonshot(w, r)
 	case "deepseek":
 		h.currentDeepSeek(w, r)
+	case "chutes":
+		h.currentChutes(w, r)
+	case "nvidia":
+		h.currentNvidia(w, r)
+	case "googleaistudio":
+		h.currentGoogleAIStudio(w, r)
 	case "gemini":
 		h.currentGemini(w, r)
 	case "cursor":
@@ -2881,6 +2941,7 @@ func (h *Handler) buildGrokCurrentOK() (response map[string]interface{}, readOK 
 		}
 	}
 
+	EnrichSubscriptionPace("grok", response, time.Now().UTC())
 	return response, readOK, hasData
 }
 
@@ -3200,6 +3261,15 @@ func (h *Handler) currentBoth(w http.ResponseWriter, r *http.Request) {
 	if h.config.HasProvider("deepseek") && providerTelemetryEnabled(visibility, "deepseek") {
 		response["deepseek"] = h.buildDeepSeekCurrent()
 	}
+	if h.config.HasProvider("chutes") && providerTelemetryEnabled(visibility, "chutes") {
+		response["chutes"] = h.buildChutesCurrent()
+	}
+	if h.config.HasProvider("nvidia") && providerTelemetryEnabled(visibility, "nvidia") {
+		response["nvidia"] = h.buildNvidiaCurrent()
+	}
+	if h.config.HasProvider("googleaistudio") && providerTelemetryEnabled(visibility, "googleaistudio") {
+		response["googleaistudio"] = h.buildGoogleAIStudioCurrent()
+	}
 	if h.config.HasProvider("gemini") && providerTelemetryEnabled(visibility, "gemini") {
 		response["gemini"] = h.buildGeminiCurrent()
 	}
@@ -3303,6 +3373,7 @@ func (h *Handler) buildSyntheticCurrentOK() (response map[string]interface{}, re
 	}
 
 	applyDisplayModeToResponse(response, h.getDisplayMode("synthetic"))
+	EnrichSubscriptionPace("synthetic", response, now)
 	return response, true, hasData
 }
 
@@ -3363,6 +3434,7 @@ func (h *Handler) buildZaiCurrentOK() (response map[string]interface{}, readOK b
 	}
 
 	applyDisplayModeToResponse(response, h.getDisplayMode("zai"))
+	EnrichSubscriptionPace("zai", response, now)
 	return response, true, hasData
 }
 
@@ -3644,6 +3716,12 @@ func (h *Handler) History(w http.ResponseWriter, r *http.Request) {
 		h.historyMoonshot(w, r)
 	case "deepseek":
 		h.historyDeepSeek(w, r)
+	case "chutes":
+		h.historyChutes(w, r)
+	case "nvidia":
+		h.historyNvidia(w, r)
+	case "googleaistudio":
+		h.historyGoogleAIStudio(w, r)
 	case "gemini":
 		h.historyGemini(w, r)
 	case "cursor":
@@ -4441,12 +4519,105 @@ func (h *Handler) buildOpenRouterCurrentOK() (response map[string]interface{}, r
 				"rate":        0.0,
 				"projected":   0.0,
 			}
-			if latest.Limit != nil && *latest.Limit > 0 {
-				credits["limit"] = *latest.Limit
-				credits["percent"] = (latest.Usage / *latest.Limit) * 100
+			effectiveKeyLimit := latest.Limit
+			if poolCap := h.routingPoolCapUSD("openrouter-payg"); poolCap > 0 {
+				effectiveKeyLimit = &poolCap
 			}
-			if latest.LimitRemaining != nil {
-				credits["remaining"] = *latest.LimitRemaining
+			if effectiveKeyLimit != nil && *effectiveKeyLimit > 0 {
+				credits["cap"] = *effectiveKeyLimit
+			}
+			if latest.AccountCredits != nil {
+				account := latest.AccountCredits
+				credits["name"] = "Account Credits"
+				credits["source"] = "account"
+				credits["usage"] = account.TotalUsage
+				credits["limit"] = account.TotalCredits
+				remaining := account.TotalCredits - account.TotalUsage
+				if remaining < 0 {
+					remaining = 0
+				}
+				credits["remaining"] = remaining
+				// New semantics (per user request for cap vs available):
+				// - If user set a key/routing cap (> 0), take the cap as 100% reference.
+				//   percent = (min(remaining_credit, cap) / cap) * 100  (so >=cap → 100% available)
+				// - Without a cap, always 100% if remaining credit > 0, else 0.
+				credits["percent"] = 0.0
+				if effectiveKeyLimit != nil && *effectiveKeyLimit > 0 {
+					cap := *effectiveKeyLimit
+					rem := remaining
+					if latest.LimitRemaining != nil && *latest.LimitRemaining < rem {
+						rem = *latest.LimitRemaining
+					}
+					if rem < 0 {
+						rem = 0
+					}
+					avail := rem
+					if avail > cap {
+						avail = cap
+					}
+					if avail < 0 {
+						avail = 0
+					}
+					credits["percent"] = (avail / cap) * 100
+				} else if remaining > 0 {
+					credits["percent"] = 100.0
+				}
+			} else {
+				if effectiveKeyLimit != nil && *effectiveKeyLimit > 0 {
+					l := *effectiveKeyLimit
+					credits["limit"] = l
+					rem := 0.0
+					if latest.LimitRemaining != nil {
+						rem = *latest.LimitRemaining
+					} else {
+						rem = l - latest.Usage
+					}
+					if rem < 0 {
+						rem = 0
+					}
+					avail := rem
+					if avail > l {
+						avail = l
+					}
+					credits["percent"] = (avail / l) * 100
+					credits["remaining"] = rem
+				}
+				if latest.LimitRemaining != nil {
+					credits["remaining"] = *latest.LimitRemaining
+				}
+				// no cap at all: 100 if positive credit indicator, else 0 (rare path)
+				if (effectiveKeyLimit == nil || *effectiveKeyLimit <= 0) && credits["percent"] == 0.0 {
+					if latest.LimitRemaining != nil && *latest.LimitRemaining > 0 {
+						credits["percent"] = 100.0
+					} else if latest.Usage == 0 {
+						// uncapped key with no usage reported yet often means available credit
+						credits["percent"] = 100.0
+					}
+				}
+			}
+
+			// Post-process for OpenRouter credits semantics:
+			// Backend sets a "good" value (100=available of cap, or 100/0 when no cap) into percent temporarily.
+			// Normalize: "percent" becomes utilization (high=bad) for shared status/meter logic.
+			// "cardPercent" and "remainingPercent" carry the available % so the openrouter card and menubar can display "100% available".
+			if pp, ok := credits["percent"].(float64); ok {
+				good := pp
+				if good < 0 {
+					good = 0
+				}
+				if good > 100 {
+					good = 100
+				}
+				util := 100 - good
+				if util < 0 {
+					util = 0
+				}
+				if util > 100 {
+					util = 100
+				}
+				credits["percent"] = util
+				credits["cardPercent"] = good
+				credits["remainingPercent"] = good
 			}
 
 			// Enrich with tracker data
@@ -4880,6 +5051,12 @@ func (h *Handler) Cycles(w http.ResponseWriter, r *http.Request) {
 		h.cyclesMoonshot(w, r)
 	case "deepseek":
 		h.cyclesDeepSeek(w, r)
+	case "chutes":
+		respondJSON(w, http.StatusOK, h.chutesCycleOverview())
+	case "nvidia":
+		respondJSON(w, http.StatusOK, h.nvidiaCycleOverview())
+	case "googleaistudio":
+		respondJSON(w, http.StatusOK, h.googleAIStudioCycleOverview())
 	case "gemini":
 		h.cyclesGemini(w, r)
 	case "cursor":
@@ -5048,6 +5225,15 @@ func (h *Handler) cyclesBoth(w http.ResponseWriter, r *http.Request) {
 
 	if h.config.HasProvider("deepseek") {
 		response["deepseek"] = h.deepseekCycleOverview(h.deepseekCurrency(""))
+	}
+	if h.config.HasProvider("chutes") {
+		response["chutes"] = h.chutesCycleOverview()
+	}
+	if h.config.HasProvider("nvidia") {
+		response["nvidia"] = h.nvidiaCycleOverview()
+	}
+	if h.config.HasProvider("googleaistudio") {
+		response["googleaistudio"] = h.googleAIStudioCycleOverview()
 	}
 
 	if h.config.HasProvider("gemini") {
@@ -5228,6 +5414,12 @@ func (h *Handler) Summary(w http.ResponseWriter, r *http.Request) {
 		h.summaryMoonshot(w, r)
 	case "deepseek":
 		h.summaryDeepSeek(w, r)
+	case "chutes":
+		respondJSON(w, http.StatusOK, h.buildChutesSummaryMap())
+	case "nvidia":
+		respondJSON(w, http.StatusOK, h.buildNvidiaSummaryMap())
+	case "googleaistudio":
+		respondJSON(w, http.StatusOK, h.buildGoogleAIStudioSummaryMap())
 	case "gemini":
 		h.summaryGemini(w, r)
 	case "cursor":
@@ -5288,6 +5480,15 @@ func (h *Handler) summaryBoth(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.config.HasProvider("deepseek") {
 		response["deepseek"] = h.buildDeepSeekSummaryMap(h.deepseekCurrency(""))
+	}
+	if h.config.HasProvider("chutes") {
+		response["chutes"] = h.buildChutesSummaryMap()
+	}
+	if h.config.HasProvider("nvidia") {
+		response["nvidia"] = h.buildNvidiaSummaryMap()
+	}
+	if h.config.HasProvider("googleaistudio") {
+		response["googleaistudio"] = h.buildGoogleAIStudioSummaryMap()
 	}
 	if h.config.HasProvider("anthropic") {
 		response["anthropic"] = h.buildAnthropicSummaryMap()
@@ -5921,6 +6122,15 @@ func (h *Handler) sessionsBoth(w http.ResponseWriter, r *http.Request) {
 	if h.config.HasProvider("deepseek") {
 		response["deepseek"] = buildSessionList("deepseek")
 	}
+	if h.config.HasProvider("chutes") {
+		response["chutes"] = buildSessionList("chutes")
+	}
+	if h.config.HasProvider("nvidia") {
+		response["nvidia"] = buildSessionList("nvidia")
+	}
+	if h.config.HasProvider("googleaistudio") {
+		response["googleaistudio"] = buildSessionList("googleaistudio")
+	}
 
 	respondJSON(w, http.StatusOK, response)
 }
@@ -6069,6 +6279,12 @@ func (h *Handler) Insights(w http.ResponseWriter, r *http.Request) {
 		h.insightsMoonshot(w, r, rangeDur)
 	case "deepseek":
 		h.insightsDeepSeek(w, r, rangeDur)
+	case "chutes":
+		respondJSON(w, http.StatusOK, h.buildChutesInsights())
+	case "nvidia":
+		respondJSON(w, http.StatusOK, h.buildNvidiaInsights())
+	case "googleaistudio":
+		respondJSON(w, http.StatusOK, h.buildGoogleAIStudioInsights())
 	case "gemini":
 		h.insightsGemini(w, r, rangeDur)
 	case "cursor":
@@ -6173,6 +6389,15 @@ func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur 
 	}
 	if h.config.HasProvider("deepseek") && providerTelemetryEnabled(visibility, "deepseek") {
 		response["deepseek"] = h.buildDeepSeekInsights(h.deepseekCurrency(""), hidden)
+	}
+	if h.config.HasProvider("chutes") && providerTelemetryEnabled(visibility, "chutes") {
+		response["chutes"] = h.buildChutesInsights()
+	}
+	if h.config.HasProvider("nvidia") && providerTelemetryEnabled(visibility, "nvidia") {
+		response["nvidia"] = h.buildNvidiaInsights()
+	}
+	if h.config.HasProvider("googleaistudio") && providerTelemetryEnabled(visibility, "googleaistudio") {
+		response["googleaistudio"] = h.buildGoogleAIStudioInsights()
 	}
 	if h.config.HasProvider("gemini") && providerTelemetryEnabled(visibility, "gemini") {
 		response["gemini"] = insightsResponse{Stats: []insightStat{}, Insights: []insightItem{}}
@@ -6858,6 +7083,7 @@ func (h *Handler) buildAnthropicCurrentOK() (response map[string]interface{}, re
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("anthropic"))
+	EnrichSubscriptionPace("anthropic", response, now)
 	return response, true, true
 }
 
@@ -6922,6 +7148,7 @@ func (h *Handler) buildAnthropicCurrentFallbackOK(response map[string]interface{
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("anthropic"))
+	EnrichSubscriptionPace("anthropic", response, now)
 	return response, true, true
 }
 
@@ -8876,6 +9103,12 @@ func (h *Handler) CycleOverview(w http.ResponseWriter, r *http.Request) {
 		h.cycleOverviewMoonshot(w, r)
 	case "deepseek":
 		h.cycleOverviewDeepSeek(w, r)
+	case "chutes":
+		respondJSON(w, http.StatusOK, h.chutesCycleOverview())
+	case "nvidia":
+		respondJSON(w, http.StatusOK, h.nvidiaCycleOverview())
+	case "googleaistudio":
+		respondJSON(w, http.StatusOK, h.googleAIStudioCycleOverview())
 	case "gemini":
 		h.cycleOverviewGemini(w, r)
 	case "cursor":
@@ -9168,6 +9401,15 @@ func (h *Handler) cycleOverviewBoth(w http.ResponseWriter, r *http.Request) {
 	if h.config.HasProvider("deepseek") {
 		response["deepseek"] = h.deepseekCycleOverview(h.deepseekCurrency(""))
 	}
+	if h.config.HasProvider("chutes") {
+		response["chutes"] = h.chutesCycleOverview()
+	}
+	if h.config.HasProvider("nvidia") {
+		response["nvidia"] = h.nvidiaCycleOverview()
+	}
+	if h.config.HasProvider("googleaistudio") {
+		response["googleaistudio"] = h.googleAIStudioCycleOverview()
+	}
 
 	if h.config.HasProvider("gemini") {
 		response["gemini"] = map[string]interface{}{
@@ -9293,6 +9535,7 @@ func (h *Handler) buildCopilotCurrentOK() (response map[string]interface{}, read
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("copilot"))
+	EnrichSubscriptionPace("copilot", response, now)
 	return response, true, true
 }
 
@@ -9926,6 +10169,7 @@ func (h *Handler) buildCodexCurrentOK(accountID int64) (response map[string]inte
 	response["quotas"] = quotas
 	response["resetCredits"] = h.buildCodexResetCredits(accountID, latest)
 	applyDisplayModeToResponse(response, displayMode)
+	EnrichSubscriptionPace("codex", response, now)
 	return response, true, hasData
 }
 
@@ -10122,6 +10366,7 @@ func (h *Handler) buildAntigravityCurrentOK() (response map[string]interface{}, 
 			response["lowestPool"] = lowest
 		}
 		applyDisplayModeToResponse(response, h.getDisplayMode("antigravity"))
+		EnrichSubscriptionPace("antigravity", response, now)
 		return response, true, true
 	}
 
@@ -10175,6 +10420,7 @@ func (h *Handler) buildAntigravityCurrentOK() (response map[string]interface{}, 
 	}
 
 	applyDisplayModeToResponse(response, h.getDisplayMode("antigravity"))
+	EnrichSubscriptionPace("antigravity", response, now)
 	return response, true, true
 }
 
@@ -10498,6 +10744,17 @@ func (h *Handler) historyAntigravity(w http.ResponseWriter, r *http.Request) {
 	for _, key := range groupKeys {
 		groupedSeries[key] = make([]float64, 0, len(labels))
 	}
+	modelSeries := make(map[string][]interface{})
+	seenModels := make(map[string]bool)
+
+	for i := 0; i < len(snapshots); i += step {
+		for _, m := range snapshots[i].Models {
+			seenModels[m.ModelID] = true
+		}
+	}
+	for modelID := range seenModels {
+		modelSeries[modelID] = make([]interface{}, 0, len(labels))
+	}
 
 	for i := 0; i < len(snapshots); i += step {
 		groups := api.GroupAntigravityModelsByLogicalQuota(snapshots[i].Models)
@@ -10507,6 +10764,23 @@ func (h *Handler) historyAntigravity(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, key := range groupKeys {
 			groupedSeries[key] = append(groupedSeries[key], valueByGroup[key])
+		}
+		byModel := make(map[string]float64, len(snapshots[i].Models))
+		for _, m := range snapshots[i].Models {
+			usedPct := (1.0 - m.RemainingFraction) * 100.0
+			if usedPct < 0 {
+				usedPct = 0
+			} else if usedPct > 100 {
+				usedPct = 100
+			}
+			byModel[m.ModelID] = usedPct
+		}
+		for modelID := range seenModels {
+			if v, ok := byModel[modelID]; ok {
+				modelSeries[modelID] = append(modelSeries[modelID], v)
+			} else {
+				modelSeries[modelID] = append(modelSeries[modelID], nil)
+			}
 		}
 	}
 
@@ -10522,8 +10796,9 @@ func (h *Handler) historyAntigravity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"labels":   labels,
-		"datasets": datasets,
+		"labels":      labels,
+		"datasets":    datasets,
+		"modelSeries": modelSeries,
 	})
 }
 
@@ -11218,6 +11493,7 @@ func (h *Handler) buildMiniMaxCurrentOK(accountID int64) (response map[string]in
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("minimax"))
+	EnrichSubscriptionPace("minimax", response, now)
 	return response, true, hasData
 }
 
@@ -12737,6 +13013,12 @@ func (h *Handler) LoggingHistory(w http.ResponseWriter, r *http.Request) {
 		h.loggingHistoryMoonshot(w, r)
 	case "deepseek":
 		h.loggingHistoryDeepSeek(w, r)
+	case "chutes":
+		h.loggingHistoryChutes(w, r)
+	case "nvidia":
+		h.loggingHistoryNvidia(w, r)
+	case "googleaistudio":
+		h.loggingHistoryGoogleAIStudio(w, r)
 	case "gemini":
 		h.loggingHistoryGemini(w, r)
 	case "cursor":

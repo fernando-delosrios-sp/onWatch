@@ -620,6 +620,61 @@ func (s *Store) createTables() error {
 			peak_usage REAL DEFAULT 0,
 			total_delta REAL DEFAULT 0
 		);
+		CREATE TABLE IF NOT EXISTS chutes_snapshots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			captured_at DATETIME NOT NULL,
+			used_usd REAL DEFAULT 0,
+			limit_usd REAL DEFAULT 0,
+			used_percent REAL DEFAULT 0,
+			balance_usd REAL DEFAULT 0,
+			resets_at DATETIME,
+			model_count INTEGER NOT NULL DEFAULT 0,
+			raw_json TEXT
+		);
+		CREATE TABLE IF NOT EXISTS chutes_reset_cycles (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			quota_type TEXT NOT NULL,
+			cycle_start DATETIME NOT NULL,
+			cycle_end DATETIME,
+			peak_usage REAL DEFAULT 0,
+			total_delta REAL DEFAULT 0
+		);
+		CREATE TABLE IF NOT EXISTS nvidia_snapshots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			captured_at DATETIME NOT NULL,
+			model_count INTEGER NOT NULL DEFAULT 0,
+			rate_limit_remaining INTEGER NOT NULL DEFAULT 0,
+			rate_limit_limit INTEGER NOT NULL DEFAULT 0,
+			key_valid INTEGER NOT NULL DEFAULT 1,
+			raw_json TEXT
+		);
+		CREATE TABLE IF NOT EXISTS nvidia_reset_cycles (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			quota_type TEXT NOT NULL,
+			cycle_start DATETIME NOT NULL,
+			cycle_end DATETIME,
+			peak_usage REAL DEFAULT 0,
+			total_delta REAL DEFAULT 0
+		);
+		CREATE TABLE IF NOT EXISTS google_aistudio_snapshots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			captured_at DATETIME NOT NULL,
+			project TEXT,
+			requests_24h INTEGER NOT NULL DEFAULT 0,
+			cap_usd REAL DEFAULT 15,
+			spent_usd REAL DEFAULT 0,
+			model_count INTEGER NOT NULL DEFAULT 0,
+			key_valid INTEGER NOT NULL DEFAULT 1,
+			raw_json TEXT
+		);
+		CREATE TABLE IF NOT EXISTS google_aistudio_reset_cycles (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			quota_type TEXT NOT NULL,
+			cycle_start DATETIME NOT NULL,
+			cycle_end DATETIME,
+			peak_usage REAL DEFAULT 0,
+			total_delta REAL DEFAULT 0
+		);
 
 		-- Antigravity indexes
 		CREATE INDEX IF NOT EXISTS idx_antigravity_snapshots_captured ON antigravity_snapshots(captured_at);
@@ -1220,6 +1275,14 @@ func (s *Store) migrateSchema() error {
 			if !strings.Contains(err.Error(), "duplicate column name") {
 				return fmt.Errorf("failed to add %s to sessions: %w", col, err)
 			}
+		}
+	}
+
+	// Optional account-wide OpenRouter credits for each key snapshot.
+	for _, col := range []string{"account_total_credits REAL", "account_total_usage REAL"} {
+		if _, err := s.db.Exec(`ALTER TABLE openrouter_snapshots ADD COLUMN ` + col); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") && !strings.Contains(err.Error(), "no such table") {
+			return fmt.Errorf("failed to migrate OpenRouter account credits: %w", err)
 		}
 	}
 
@@ -2869,4 +2932,3 @@ func (s *Store) HasActiveAlertOfType(provider, alertType string) (bool, error) {
 func (s *Store) DB() *sql.DB {
 	return s.db
 }
-

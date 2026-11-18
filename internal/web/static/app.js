@@ -88,6 +88,9 @@ function getCurrentProvider() {
   if (moonshotGrid) return 'moonshot';
   const deepseekGrid = document.getElementById('quota-grid-deepseek');
   if (deepseekGrid) return 'deepseek';
+  if (document.getElementById('quota-grid-chutes')) return 'chutes';
+  if (document.getElementById('quota-grid-nvidia')) return 'nvidia';
+  if (document.getElementById('quota-grid-googleaistudio')) return 'googleaistudio';
   const grid = document.getElementById('quota-grid');
   return (grid && grid.dataset.provider) || 'synthetic';
 }
@@ -156,6 +159,9 @@ const State = {
   refreshInterval: null,
   peakTickInterval: null,
   currentQuotas: {},
+  currentProviderPayloads: {},
+  cycleCharts: [],
+  lastHistoryPayload: null,
   // Table data caches
   allCyclesData: [],
   allSessionsData: [],
@@ -1439,6 +1445,15 @@ const renewalCategories = {
   deepseek: [
     { label: 'Balance', groupBy: 'balance' }
   ],
+  chutes: [
+    { label: 'Credits', groupBy: 'credits' }
+  ],
+  nvidia: [
+    { label: 'NIM', groupBy: 'nim' }
+  ],
+  googleaistudio: [
+    { label: 'Voucher', groupBy: 'voucher' }
+  ],
   grok: [
     { label: 'Credits', groupBy: 'credits' }
   ],
@@ -2575,28 +2590,40 @@ function openGeminiModal(modelId) {
 }
 
 // OpenRouter quota card rendering
+function formatOpenRouterSubtitle(credits) {
+  const parts = [];
+  if (credits.isFreeTier) parts.push('Free Tier');
+  if (credits.cap != null && Number(credits.cap) > 0) {
+    parts.push(`Cap: $${Number(credits.cap).toFixed(2)}`);
+  }
+  return parts.join(' · ');
+}
+
 function renderOpenRouterCard(credits, containerId) {
   const container = document.getElementById(containerId);
   if (!container) return;
 
   const hasLimit = credits.limit != null && credits.limit > 0;
-  const usagePct = hasLimit ? (credits.percent || 0).toFixed(1) : null;
-  const status = hasLimit ? getQuotaStatus(credits.percent || 0) : 'healthy';
+  const util = Number(credits.percent || 0);
+  const goodP = credits.remainingPercent != null ? Number(credits.remainingPercent) :
+                (credits.cardPercent != null ? Number(credits.cardPercent) : (100 - util));
+  const status = getQuotaStatus(util);
   const statusCfg = statusConfig[status] || statusConfig.healthy;
-  const usageStr = '$' + (credits.usage || 0).toFixed(4);
-  const limitStr = hasLimit ? '$' + credits.limit.toFixed(4) : 'Unlimited';
-  const remainStr = credits.remaining != null ? '$' + credits.remaining.toFixed(4) : '--';
-  const percentLabel = hasLimit ? `${usagePct}%` : 'Spent';
-  const barWidth = hasLimit ? `${usagePct}%` : '0%';
+  const usageStr = '$' + (credits.usage || 0).toFixed(2);
+  const limitStr = hasLimit ? '$' + credits.limit.toFixed(2) : (credits.source === 'account' ? '$0.00' : 'Unlimited');
+  const remainStr = credits.remaining != null ? '$' + Number(credits.remaining).toFixed(2) : '--';
+  const percentLabel = `${goodP.toFixed(1)}%`;
+  const barWidth = `${goodP}%`;
+  const subtitleText = formatOpenRouterSubtitle(credits);
 
   container.innerHTML = `<article class="quota-card openrouter-card" data-quota="credits" data-provider="openrouter" style="animation-delay: 0ms">
     <header class="card-header">
       <div class="quota-title-block">
         <h2 class="quota-title">
           <svg class="quota-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-          Credits
+          <span id="title-openrouter-credits">${credits.source === 'account' ? 'Account Credits' : 'Credits'}</span>
         </h2>
-        ${credits.isFreeTier ? '<div class="quota-subtitle">Free Tier</div>' : ''}
+        <div class="quota-subtitle" id="subtitle-openrouter-credits" ${subtitleText ? '' : 'style="display: none"'}>${subtitleText}</div>
       </div>
       <span class="countdown" id="countdown-openrouter-credits" style="display: none">--:--</span>
     </header>
@@ -2605,7 +2632,7 @@ function renderOpenRouterCard(credits, containerId) {
       <span class="usage-fraction" id="fraction-openrouter-credits">${usageStr} / ${limitStr}</span>
     </div>
     <div class="progress-wrapper">
-      <div class="progress-bar" role="progressbar" aria-valuenow="${hasLimit ? Math.round(credits.percent || 0) : 0}" aria-valuemin="0" aria-valuemax="100">
+      <div class="progress-bar" role="progressbar" aria-valuenow="${Math.round(goodP || 0)}" aria-valuemin="0" aria-valuemax="100">
         <div class="progress-fill" id="progress-openrouter-credits" style="width: ${barWidth}" data-status="${status}"></div>
       </div>
     </div>
@@ -2614,7 +2641,7 @@ function renderOpenRouterCard(credits, containerId) {
         <svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${statusCfg.icon}"/></svg>
         ${statusCfg.label}
       </span>
-      <span class="reset-time" id="reset-openrouter-credits">${hasLimit ? 'Remaining: ' + remainStr : ''}</span>
+      <span class="reset-time" id="reset-openrouter-credits">${remainStr !== '--' ? 'Remaining: ' + remainStr : ''}</span>
     </footer>
   </article>`;
 }
@@ -2622,21 +2649,34 @@ function renderOpenRouterCard(credits, containerId) {
 function updateOpenRouterCard(credits) {
   const key = 'openrouter-credits';
   const prev = State.currentQuotas[key];
+  const util = Number(credits.percent || 0);
+  const goodP = credits.remainingPercent != null ? Number(credits.remainingPercent) :
+                (credits.cardPercent != null ? Number(credits.cardPercent) : (100 - util));
+  const orStatus = getQuotaStatus(util);
   State.currentQuotas[key] = {
-    percent: credits.percent || 0,
+    percent: goodP,
     usage: credits.usage || 0,
     limit: credits.limit,
     remaining: credits.remaining,
-    status: getQuotaStatus(credits.percent || 0),
+    cap: credits.cap,
+    status: orStatus,
     isFreeTier: credits.isFreeTier
   };
 
   const hasLimit = credits.limit != null && credits.limit > 0;
-  const usagePct = hasLimit ? (credits.percent || 0).toFixed(1) : '—';
-  const status = hasLimit ? getQuotaStatus(credits.percent || 0) : 'healthy';
-  const usageStr = '$' + (credits.usage || 0).toFixed(4);
-  const limitStr = hasLimit ? '$' + credits.limit.toFixed(4) : 'Unlimited';
-  const remainStr = credits.remaining != null ? '$' + credits.remaining.toFixed(4) : '--';
+  const usagePct = goodP.toFixed(1);
+  const status = orStatus;
+  const usageStr = '$' + (credits.usage || 0).toFixed(2);
+  const limitStr = hasLimit ? '$' + credits.limit.toFixed(2) : (credits.source === 'account' ? '$0.00' : 'Unlimited');
+  const remainStr = credits.remaining != null ? '$' + Number(credits.remaining).toFixed(2) : '--';
+  const titleEl = document.getElementById('title-openrouter-credits');
+  if (titleEl) titleEl.textContent = credits.source === 'account' ? 'Account Credits' : 'Credits';
+  const subtitleEl = document.getElementById('subtitle-openrouter-credits');
+  if (subtitleEl) {
+    const subtitleText = formatOpenRouterSubtitle(credits);
+    subtitleEl.textContent = subtitleText;
+    subtitleEl.style.display = subtitleText ? '' : 'none';
+  }
 
   const progressEl = document.getElementById('progress-openrouter-credits');
   const percentEl = document.getElementById('percent-openrouter-credits');
@@ -2644,16 +2684,16 @@ function updateOpenRouterCard(credits) {
   const statusEl = document.getElementById('status-openrouter-credits');
   const resetEl = document.getElementById('reset-openrouter-credits');
 
-  const percentLabel = hasLimit ? `${usagePct}%` : 'Spent';
-  const barWidth = hasLimit ? `${usagePct}%` : '0%';
+  const percentLabel = `${usagePct}%`;
+  const barWidth = `${usagePct}%`;
   if (progressEl) {
     progressEl.style.width = barWidth;
     progressEl.setAttribute('data-status', status);
   }
   if (percentEl) {
     const oldVal = prev ? prev.percent : 0;
-    if (hasLimit && Math.abs(oldVal - (credits.percent || 0)) > 0.2) {
-      animateValue(percentEl, oldVal, credits.percent || 0, 400, v => `${v.toFixed(1)}%`);
+    if (Math.abs(oldVal - goodP) > 0.2) {
+      animateValue(percentEl, oldVal, goodP, 400, v => `${v.toFixed(1)}%`);
     } else {
       percentEl.textContent = percentLabel;
     }
@@ -2664,7 +2704,103 @@ function updateOpenRouterCard(credits) {
     statusEl.setAttribute('data-status', status);
     statusEl.innerHTML = `<svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${config.icon}"/></svg>${config.label}`;
   }
-  if (resetEl) resetEl.textContent = hasLimit ? 'Remaining: ' + remainStr : '';
+  if (resetEl) resetEl.textContent = (remainStr && remainStr !== '--') ? 'Remaining: ' + remainStr : '';
+}
+
+function renderChutesCard(credits, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container || !credits) return;
+  const hasLimit = Number(credits.limitUsd || 0) > 0;
+  const util = Number(credits.percent || 0);
+  const goodPRaw = credits.remainingPercent != null ? Number(credits.remainingPercent) :
+                   (credits.cardPercent != null ? Number(credits.cardPercent) : (100 - util));
+  const goodP = Math.min(100, Math.max(0, goodPRaw));
+  const used = Number(credits.usedUsd || 0).toFixed(2);
+  const balanceNum = credits.balanceUsd != null ? Number(credits.balanceUsd) : (credits.remaining != null ? Number(credits.remaining) : 0);
+  const balance = balanceNum.toFixed(4);
+  const limit = hasLimit ? '$' + Number(credits.limitUsd).toFixed(2) : 'Unlimited';
+  const status = credits.status || getQuotaStatus(util);
+  const cfg = statusConfig[status] || statusConfig.healthy;
+  const headline = `${goodP.toFixed(1)}%`;
+  const fraction = `$${used} / ${limit}`;
+  const barWidth = `${goodP.toFixed(1)}%`;
+  container.innerHTML = `<article class="quota-card" data-quota="credits" data-provider="chutes">
+    <header class="card-header">
+      <div class="quota-title-block">
+        <h2 class="quota-title">Chutes Credits</h2>
+        <div class="quota-subtitle">${credits.modelCount ? credits.modelCount + ' models available' : 'Chutes PAYG'}</div>
+      </div>
+    </header>
+    <div class="progress-stats">
+      <span class="usage-percent">${headline}</span>
+      <span class="usage-fraction">${fraction}</span>
+    </div>
+    <div class="progress-wrapper">
+      <div class="progress-bar"><div class="progress-fill" style="width:${barWidth}" data-status="${status}"></div></div>
+    </div>
+    <footer class="card-footer">
+      <span class="status-badge" data-status="${status}">${cfg.label}</span>
+      <span class="reset-time">${(balanceNum > 0 || hasLimit) ? 'Remaining: $' + balance : ''}</span>
+    </footer>
+  </article>`;
+}
+
+function renderNvidiaCard(nim, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container || !nim) return;
+  const status = nim.status || 'healthy';
+  const cfg = statusConfig[status] || statusConfig.healthy;
+  const lim = Number(nim.rateLimitLimit || 0);
+  const rem = Number(nim.rateLimitRemaining || 0);
+  const pct = lim > 0 ? Math.min(100, Math.max(0, ((lim - rem) / lim) * 100)) : 0;
+  container.innerHTML = `<article class="quota-card" data-quota="nim" data-provider="nvidia">
+    <header class="card-header">
+      <div class="quota-title-block">
+        <h2 class="quota-title">NVIDIA NIM</h2>
+        <div class="quota-subtitle">${nim.modelCount || 0} models available</div>
+      </div>
+    </header>
+    <div class="progress-stats">
+      <span class="usage-percent">${lim > 0 ? rem + ' / ' + lim + ' req' : (nim.keyValid ? 'Active' : 'Pending')}</span>
+      <span class="usage-fraction">${nim.modelCount || 0} models</span>
+    </div>
+    <div class="progress-wrapper">
+      <div class="progress-bar"><div class="progress-fill" style="width:${pct.toFixed(1)}%" data-status="${status}"></div></div>
+    </div>
+    <footer class="card-footer">
+      <span class="status-badge" data-status="${status}">${cfg.label}</span>
+      <span class="reset-time">integrate.api.nvidia.com</span>
+    </footer>
+  </article>`;
+}
+
+function renderGoogleAIStudioCard(aistudio, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container || !aistudio) return;
+  const status = aistudio.status || 'healthy';
+  const cfg = statusConfig[status] || statusConfig.healthy;
+  const cap = Number(aistudio.capUsd || 15);
+  const spent = Number(aistudio.spentUsd || 0);
+  const pct = cap > 0 ? Math.min(100, Math.max(0, (spent / cap) * 100)) : 0;
+  container.innerHTML = `<article class="quota-card" data-quota="voucher" data-provider="googleaistudio">
+    <header class="card-header">
+      <div class="quota-title-block">
+        <h2 class="quota-title">Google AI Studio</h2>
+        <div class="quota-subtitle">${aistudio.modelCount ? aistudio.modelCount + ' models' : 'Gemini API'}${aistudio.project ? ' · ' + escapeHtml(aistudio.project) : ''}</div>
+      </div>
+    </header>
+    <div class="progress-stats">
+      <span class="usage-percent">${pct.toFixed(1)}%</span>
+      <span class="usage-fraction">$${spent.toFixed(2)} / $${cap.toFixed(2)}</span>
+    </div>
+    <div class="progress-wrapper">
+      <div class="progress-bar"><div class="progress-fill" style="width:${pct.toFixed(1)}%" data-status="${status}"></div></div>
+    </div>
+    <footer class="card-footer">
+      <span class="status-badge" data-status="${status}">${cfg.label}</span>
+      <span class="reset-time">${aistudio.requests24h || 0} req / 24h</span>
+    </footer>
+  </article>`;
 }
 
 // ── Balance providers (Moonshot, DeepSeek) ──
@@ -5504,6 +5640,18 @@ async function fetchCurrent() {
             updateOpenRouterCard(data.credits);
           }
         }
+      } else if (provider === 'chutes') {
+        if (data.credits) {
+          renderChutesCard(data.credits, 'quota-grid-chutes');
+        }
+      } else if (provider === 'nvidia') {
+        if (data.nim) {
+          renderNvidiaCard(data.nim, 'quota-grid-nvidia');
+        }
+      } else if (provider === 'googleaistudio') {
+        if (data.aistudio) {
+          renderGoogleAIStudioCard(data.aistudio, 'quota-grid-googleaistudio');
+        }
       } else if (provider === 'grok') {
         const container = document.getElementById('quota-grid-grok');
         if (container) {
@@ -5613,6 +5761,31 @@ async function fetchCurrent() {
         updateCard('toolCalls', data.toolCalls);
       }
 
+      applySubscriptionPaceToDOM(provider, data);
+      if (isSubscriptionCycleChartProvider(provider)) {
+        const paceQuotas = collectProviderQuotasWithPace(provider, data).filter(q => q.cycleStart && q.cycleEnd);
+        if (paceQuotas.length > 0) {
+          setRangeSelectorCycleMode(true);
+          const neededRange = cycleFetchRangeForProvider(provider);
+          if (State.lastHistoryPayload && State.lastHistoryPayload.provider === provider) {
+            if (rangeHours(State.lastHistoryPayload.range) < rangeHours(neededRange)) {
+              fetchHistory('cycle');
+            } else {
+              renderSubscriptionCycleCharts(provider, data, State.lastHistoryPayload.data);
+            }
+          } else if (State.currentRange !== 'cycle') {
+            fetchHistory('cycle');
+          }
+        } else {
+          const anyQuotas = collectProviderQuotasWithPace(provider, data);
+          if (anyQuotas.length === 0) {
+            setChartSectionVisible(false);
+          }
+        }
+      } else {
+        setRangeSelectorCycleMode(false);
+        syncChartProjectedPace(provider);
+      }
       setLastUpdated();
 
       const statusDot = document.getElementById('status-dot');
@@ -6729,8 +6902,13 @@ function initChart() {
             meta.hidden = meta.hidden === null ? !ci.data.datasets[index].hidden : null;
             ci.update('none');
             // Recalculate Y-axis based on visible datasets
-            State.chartYMax = computeYMax(ci.data.datasets, ci, isBalance ? { cap: false } : {});
-            ci.options.scales.y.max = State.chartYMax;
+            if (ci.data.datasets.some(ds => ds && ds._isProjectedPace)) {
+              ci.options.scales.y.max = 100;
+              if (ci === State.chart) State.chartYMax = 100;
+            } else {
+              State.chartYMax = computeYMax(ci.data.datasets, ci, isBalance ? { cap: false } : {});
+              ci.options.scales.y.max = State.chartYMax;
+            }
             ci.update();
           }
         },
@@ -6837,6 +7015,30 @@ function updateChartTheme() {
   State.chart.options.plugins.tooltip.bodyColor = colors.text;
   State.chart.options.plugins.tooltip.borderColor = colors.outline;
   State.chart.update('none');
+
+  if (Array.isArray(State.cycleCharts)) {
+    State.cycleCharts.forEach(c => {
+      if (!c || !c.options) return;
+      if (c.options.scales && c.options.scales.x) {
+        if (c.options.scales.x.grid) c.options.scales.x.grid.color = colors.grid;
+        if (c.options.scales.x.ticks) c.options.scales.x.ticks.color = colors.text;
+      }
+      if (c.options.scales && c.options.scales.y) {
+        if (c.options.scales.y.grid) c.options.scales.y.grid.color = colors.grid;
+        if (c.options.scales.y.ticks) c.options.scales.y.ticks.color = colors.text;
+      }
+      if (c.options.plugins && c.options.plugins.legend && c.options.plugins.legend.labels) {
+        c.options.plugins.legend.labels.color = colors.text;
+      }
+      if (c.options.plugins && c.options.plugins.tooltip) {
+        c.options.plugins.tooltip.backgroundColor = colors.surfaceContainer;
+        c.options.plugins.tooltip.titleColor = colors.onSurface;
+        c.options.plugins.tooltip.bodyColor = colors.text;
+        c.options.plugins.tooltip.borderColor = colors.outline;
+      }
+      c.update('none');
+    });
+  }
 }
 
 // historyBodyError reports why a successful HTTP response still cannot be
@@ -6930,7 +7132,7 @@ function markChartStale(reason) {
 }
 // The rendered key lives on the chart itself, so destroying the chart also
 // drops the claim that its lines match the current selection.
-function recordChartRendered(provider, range) {
+function recordChartRendered(provider, range, opts) {
   if (!State.chart) return;
   State.chart.renderKey = {
     provider,
@@ -6940,6 +7142,9 @@ function recordChartRendered(provider, range) {
     lastSuccessAt: Date.now(),
   };
   clearChartStale();
+  if (!(opts && opts.skipProjectedPace)) {
+    syncChartProjectedPace(provider);
+  }
 }
 
 function historyRequestIsCurrent(provider, account, range, seq) {
@@ -7050,8 +7255,14 @@ async function fetchHistory(range) {
   const requestProvider = getCurrentProvider();
   const requestAccount = requestProvider === 'codex' ? State.codexAccount : null;
   const requestRange = range;
+  const fetchRange = range === 'cycle' ? cycleFetchRangeForProvider(requestProvider) : range;
   const requestSeq = (State.historyRequestSeq || 0) + 1;
   State.historyRequestSeq = requestSeq;
+
+  if (['nvidia', 'googleaistudio', 'chutes'].includes(requestProvider)) {
+    setChartSectionVisible(false);
+    return;
+  }
 
   if (isAccountsOverviewMode(requestProvider)) {
     await renderMultiAccountChart(requestProvider, range, requestSeq);
@@ -7085,7 +7296,7 @@ async function fetchHistory(range) {
       return;
     }
 
-    const res = await authFetch(`${API_BASE}/api/history?range=${range}&${providerParam()}`);
+    const res = await authFetch(`${API_BASE}/api/history?range=${fetchRange}&${providerParam()}`);
     if (!res.ok) {
       warnHistoryFailure(requestProvider, range, `HTTP ${res.status}`, res.status);
       markHistoryFailureStale(requestProvider, range, requestSeq, requestAccount);
@@ -7114,6 +7325,22 @@ async function fetchHistory(range) {
     if (!historyRequestIsCurrent(requestProvider, requestAccount, requestRange, requestSeq)) return;
 
     const provider = requestProvider;
+    State.lastHistoryPayload = { provider, range: fetchRange, data };
+
+    if (isSubscriptionCycleChartProvider(provider) && State.currentProviderPayloads[provider]) {
+      const paceQuotas = collectProviderQuotasWithPace(provider, State.currentProviderPayloads[provider]).filter(q => q.cycleStart && q.cycleEnd);
+      if (paceQuotas.length > 0) {
+        const neededRange = cycleFetchRangeForProvider(provider);
+        if (rangeHours(fetchRange) < rangeHours(neededRange)) {
+          fetchHistory('cycle');
+          return;
+        }
+        if (renderSubscriptionCycleCharts(provider, State.currentProviderPayloads[provider], data)) {
+          recordChartRendered(provider, range, { skipProjectedPace: true });
+          return;
+        }
+      }
+    }
 
     if (provider === 'both') {
       if (apiIntegrationsHistoryData) {
@@ -8141,6 +8368,577 @@ function buildAllProviderEntries() {
   return entries;
 }
 
+function extractQuotaPaceInfo(quota) {
+  if (!quota || typeof quota !== 'object') return null;
+  if (!quota.paceStatus || !Number.isFinite(Number(quota.projectedPace))) return null;
+  const projectedPace = Number(quota.projectedPace);
+  const paceDelta = Number.isFinite(Number(quota.paceDelta)) ? Number(quota.paceDelta) : 0;
+  return {
+    projectedPace: Math.max(0, Math.min(100, projectedPace)),
+    paceDelta,
+    paceStatus: String(quota.paceStatus),
+    cycleStart: quota.cycleStart || '',
+    cycleEnd: quota.cycleEnd || '',
+  };
+}
+
+function paceStatusLabel(paceStatus, paceDelta) {
+  if (paceStatus === 'red') return 'Over pace';
+  if (paceStatus === 'yellow') return 'Ahead of pace';
+  return paceDelta < -5 ? 'Under pace' : 'On pace';
+}
+
+function paceMarkerHTML(quota) {
+  const pace = extractQuotaPaceInfo(quota);
+  if (!pace) return '';
+  const pct = pace.projectedPace.toFixed(1);
+  return `<div class="progress-pace-marker" style="left: ${pct}%" title="Linear projected use: ${pct}%"></div>`;
+}
+
+function paceRowHTML(quota) {
+  const pace = extractQuotaPaceInfo(quota);
+  if (!pace) return '';
+  const pct = pace.projectedPace.toFixed(1);
+  const sign = pace.paceDelta >= 0 ? '+' : '';
+  const deltaStr = `${sign}${pace.paceDelta.toFixed(1)}%`;
+  const label = paceStatusLabel(pace.paceStatus, pace.paceDelta);
+  const title = `Current usage vs linear projected use (${pct}%, ${deltaStr})`;
+  return `<div class="pace-row" data-pace="${escapeHTML(pace.paceStatus)}" title="${escapeHTML(title)}">
+        <span class="traffic-light" aria-hidden="true">
+          <span class="tl-dot tl-red"></span>
+          <span class="tl-dot tl-yellow"></span>
+          <span class="tl-dot tl-green"></span>
+        </span>
+        <span class="pace-label">${escapeHTML(label)}</span>
+        <span class="pace-comparison">vs ${pct}% proj (${escapeHTML(deltaStr)})</span>
+      </div>`;
+}
+
+function applyPaceToCardElement(cardEl, quota) {
+  if (!cardEl) return;
+  const pace = extractQuotaPaceInfo(quota);
+  const progressWrapper = cardEl.querySelector('.progress-wrapper');
+  if (progressWrapper) {
+    let marker = progressWrapper.querySelector('.progress-pace-marker');
+    if (pace) {
+      const pct = pace.projectedPace.toFixed(1);
+      if (!marker) {
+        marker = document.createElement('div');
+        marker.className = 'progress-pace-marker';
+        progressWrapper.appendChild(marker);
+      }
+      marker.style.left = `${pct}%`;
+      marker.title = `Linear projected use: ${pct}%`;
+    } else if (marker) {
+      marker.remove();
+    }
+  }
+
+  let paceRow = cardEl.querySelector('.pace-row');
+  if (!pace) {
+    if (paceRow) paceRow.remove();
+    return;
+  }
+
+  const pct = pace.projectedPace.toFixed(1);
+  const sign = pace.paceDelta >= 0 ? '+' : '';
+  const deltaStr = `${sign}${pace.paceDelta.toFixed(1)}%`;
+  const label = paceStatusLabel(pace.paceStatus, pace.paceDelta);
+  const title = `Current usage vs linear projected use (${pct}%, ${deltaStr})`;
+
+  if (!paceRow) {
+    paceRow = document.createElement('div');
+    paceRow.className = 'pace-row';
+    const footer = cardEl.querySelector('.card-footer');
+    if (footer && footer.parentNode) {
+      footer.parentNode.insertBefore(paceRow, footer);
+    } else if (progressWrapper && progressWrapper.parentNode) {
+      progressWrapper.parentNode.insertBefore(paceRow, progressWrapper.nextSibling);
+    } else {
+      cardEl.appendChild(paceRow);
+    }
+  }
+  paceRow.setAttribute('data-pace', pace.paceStatus);
+  paceRow.title = title;
+  paceRow.innerHTML = `<span class="traffic-light" aria-hidden="true">
+      <span class="tl-dot tl-red"></span>
+      <span class="tl-dot tl-yellow"></span>
+      <span class="tl-dot tl-green"></span>
+    </span>
+    <span class="pace-label">${escapeHTML(label)}</span>
+    <span class="pace-comparison">vs ${pct}% proj (${escapeHTML(deltaStr)})</span>`;
+}
+
+function collectProviderQuotasWithPace(provider, data) {
+  if (!data || typeof data !== 'object') return [];
+  const list = [];
+  if (Array.isArray(data.quotas)) {
+    data.quotas.forEach(q => { if (q) list.push(q); });
+  }
+  if (provider === 'synthetic') {
+    ['subscription', 'search', 'toolCalls'].forEach(key => {
+      if (data[key] && typeof data[key] === 'object') {
+        list.push({ ...data[key], name: key });
+      }
+    });
+  } else if (provider === 'zai') {
+    ['tokensLimit', 'timeLimit', 'toolCalls'].forEach(key => {
+      if (data[key] && typeof data[key] === 'object') {
+        list.push({ ...data[key], name: key });
+      }
+    });
+  }
+  return list;
+}
+
+function applySubscriptionPaceToDOM(provider, data) {
+  if (!provider || !data) return;
+  State.currentProviderPayloads[provider] = data;
+  if (provider === 'both' || provider === 'api-integrations' || isBalanceProvider(provider)) return;
+
+  const quotas = collectProviderQuotasWithPace(provider, data);
+  if (quotas.length === 0) return;
+
+  const grid = document.getElementById(`quota-grid-${provider}`) || document.getElementById('quota-grid');
+  if (!grid) return;
+
+  const cards = grid.querySelectorAll('.quota-card[data-quota]');
+  cards.forEach(cardEl => {
+    const key = cardEl.getAttribute('data-quota');
+    const match = quotas.find(q => (q.name && q.name === key) || (q.modelId && q.modelId === key));
+    if (match) {
+      applyPaceToCardElement(cardEl, match);
+    }
+  });
+}
+
+function buildProjectedPaceDataset(provider, datasets) {
+  if (!provider || provider === 'both' || provider === 'api-integrations' || isBalanceProvider(provider)) {
+    return null;
+  }
+  const data = State.currentProviderPayloads[provider];
+  const quotas = collectProviderQuotasWithPace(provider, data).filter(q => q.cycleStart && q.cycleEnd);
+  if (quotas.length === 0) return null;
+
+  const activeQuota = quotas.find(q => !State.hiddenQuotas.has(q.name || q.modelId)) || quotas[0];
+  const cycleStartMs = Date.parse(activeQuota.cycleStart);
+  const cycleEndMs = Date.parse(activeQuota.cycleEnd);
+  if (!Number.isFinite(cycleStartMs) || !Number.isFinite(cycleEndMs) || cycleEndMs <= cycleStartMs) {
+    return null;
+  }
+
+  const tsSet = new Set();
+  (datasets || []).forEach(ds => {
+    if (!ds || ds._isProjectedPace || !Array.isArray(ds.data)) return;
+    ds.data.forEach(pt => {
+      if (!pt || pt.x == null) return;
+      const ms = pt.x instanceof Date ? pt.x.getTime() : Date.parse(pt.x);
+      if (Number.isFinite(ms)) tsSet.add(ms);
+    });
+  });
+
+  if (tsSet.size === 0) return null;
+  const sortedTs = [...tsSet].sort((a, b) => a - b);
+  const minX = sortedTs[0];
+  const maxX = sortedTs[sortedTs.length - 1];
+  if (cycleStartMs >= minX && cycleStartMs <= maxX && !tsSet.has(cycleStartMs)) {
+    sortedTs.push(cycleStartMs);
+    sortedTs.sort((a, b) => a - b);
+  }
+
+  const totalMs = cycleEndMs - cycleStartMs;
+  const points = sortedTs.map(ms => {
+    if (ms < cycleStartMs) return { x: new Date(ms), y: null };
+    const ratio = Math.max(0, Math.min(1, (ms - cycleStartMs) / totalMs));
+    return { x: new Date(ms), y: Math.round(ratio * 1000) / 10 };
+  });
+
+  if (!points.some(pt => pt.y !== null)) return null;
+
+  return {
+    label: 'Projected Use',
+    data: points,
+    borderColor: 'rgba(148, 163, 184, 0.9)',
+    backgroundColor: 'transparent',
+    borderDash: [6, 4],
+    borderWidth: 2,
+    fill: false,
+    tension: 0,
+    pointRadius: 0,
+    pointHoverRadius: 4,
+    spanGaps: true,
+    hidden: State.hiddenQuotas.has('__projected_pace__'),
+    _isProjectedPace: true,
+  };
+}
+
+function syncChartProjectedPace(provider) {
+  if (!State.chart || !State.chart.data || !Array.isArray(State.chart.data.datasets)) return;
+  if (!provider || provider === 'both' || provider === 'api-integrations' || isBalanceProvider(provider)) return;
+
+  const hadProjected = State.chart.data.datasets.some(ds => ds && ds._isProjectedPace);
+  const filtered = State.chart.data.datasets.filter(ds => !ds || !ds._isProjectedPace);
+  const projectedDs = buildProjectedPaceDataset(provider, filtered);
+  if (!projectedDs && !hadProjected) return;
+  if (projectedDs) {
+    filtered.push(projectedDs);
+  }
+  State.chart.data.datasets = filtered;
+  State.chartYMax = computeYMax(State.chart.data.datasets, State.chart);
+  if (State.chart.options && State.chart.options.scales && State.chart.options.scales.y) {
+    State.chart.options.scales.y.max = State.chartYMax;
+  }
+  if (typeof State.chart.update === 'function') {
+    State.chart.update('none');
+  }
+}
+
+function isSubscriptionCycleChartProvider(provider) {
+  if (!provider) return false;
+  if (['both', 'api-integrations', 'openrouter', 'chutes', 'nvidia', 'googleaistudio'].includes(provider)) {
+    return false;
+  }
+  return !isBalanceProvider(provider);
+}
+
+function cycleDurationLabel(durMs) {
+  const hours = durMs / (1000 * 60 * 60);
+  if (hours <= 1.5) return '1-Hour Cycle';
+  if (hours <= 6.5) return '5-Hour Cycle';
+  if (hours <= 25) return '24-Hour Cycle';
+  if (hours <= 8 * 24) return '7-Day Cycle';
+  return 'Monthly Cycle';
+}
+
+function cycleRangeKey(durMs) {
+  const hours = durMs / (1000 * 60 * 60);
+  if (hours <= 1.5) return '1h';
+  if (hours <= 6.5) return '6h';
+  if (hours <= 25) return '24h';
+  if (hours <= 8 * 24) return '7d';
+  return '30d';
+}
+
+function cycleFetchRangeForProvider(provider) {
+  const data = State.currentProviderPayloads[provider];
+  const quotas = collectProviderQuotasWithPace(provider, data).filter(q => q.cycleStart && q.cycleEnd);
+  if (quotas.length === 0) return '7d';
+  let maxDur = 0;
+  quotas.forEach(q => {
+    const s = Date.parse(q.cycleStart);
+    const e = Date.parse(q.cycleEnd);
+    if (Number.isFinite(s) && Number.isFinite(e) && e > s) {
+      if (e - s > maxDur) maxDur = e - s;
+    }
+  });
+  return maxDur > 0 ? cycleRangeKey(maxDur) : '7d';
+}
+
+function rangeHours(range) {
+  switch (String(range || '').toLowerCase()) {
+    case '1h': return 1;
+    case '6h': return 6;
+    case '24h':
+    case '1d': return 24;
+    case '3d': return 72;
+    case '7d': return 168;
+    case '30d': return 720;
+    default: return 168;
+  }
+}
+
+function setChartSectionVisible(visible) {
+  const section = document.querySelector('.chart-section');
+  if (section) {
+    section.style.display = visible ? '' : 'none';
+  }
+}
+
+function setRangeSelectorCycleMode(isCycle) {
+  const selector = document.querySelector('.chart-section .range-selector');
+  if (!selector) return;
+  if (isCycle) {
+    if (!selector.dataset.cycleMode) {
+      selector.dataset.originalHtml = selector.innerHTML;
+      selector.dataset.cycleMode = '1';
+      selector.innerHTML = '<button class="range-btn active" data-range="cycle">Cycle</button>';
+    }
+  } else if (selector.dataset.cycleMode) {
+    if (selector.dataset.originalHtml) {
+      selector.innerHTML = selector.dataset.originalHtml;
+    }
+    delete selector.dataset.cycleMode;
+    delete selector.dataset.originalHtml;
+  }
+}
+
+function destroyCycleCharts() {
+  if (Array.isArray(State.cycleCharts)) {
+    State.cycleCharts.forEach(c => {
+      try { if (c && typeof c.destroy === 'function') c.destroy(); } catch (e) {}
+    });
+  }
+  State.cycleCharts = [];
+  document.querySelectorAll('.cycle-chart-block, .primary-cycle-chart-title').forEach(el => el.remove());
+}
+
+function groupQuotasByCycle(quotas) {
+  const groups = [];
+  const toleranceMs = 2 * 60 * 1000;
+  quotas.forEach(q => {
+    const startMs = Date.parse(q.cycleStart);
+    const endMs = Date.parse(q.cycleEnd);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
+    let group = groups.find(g =>
+      Math.abs(g.cycleStartMs - startMs) <= toleranceMs &&
+      Math.abs(g.cycleEndMs - endMs) <= toleranceMs
+    );
+    if (!group) {
+      group = {
+        cycleStartMs: startMs,
+        cycleEndMs: endMs,
+        durationLabel: cycleDurationLabel(endMs - startMs),
+        rangeKey: cycleRangeKey(endMs - startMs),
+        quotas: [],
+      };
+      groups.push(group);
+    }
+    group.quotas.push(q);
+  });
+  return groups;
+}
+
+function extractQuotaHistoryPoints(provider, historyData, quota) {
+  const qName = quota.name || quota.modelId || '';
+  if (!historyData) return [];
+
+  if (provider === 'antigravity' && Array.isArray(historyData.labels)) {
+    if (historyData.modelSeries && Array.isArray(historyData.modelSeries[qName])) {
+      return historyData.modelSeries[qName].map((y, idx) => ({
+        x: new Date(historyData.labels[idx]),
+        y: y == null ? null : Number(y),
+      })).filter(pt => Number.isFinite(pt.x.getTime()));
+    }
+    if (Array.isArray(historyData.datasets)) {
+      const ds = historyData.datasets.find(d => d && (d.modelId === qName || d.label === quota.displayName || d.label === quota.label));
+      if (!ds || !Array.isArray(ds.data)) return [];
+      return ds.data.map((y, idx) => ({
+        x: new Date(historyData.labels[idx]),
+        y: y == null ? null : Number(y),
+      })).filter(pt => Number.isFinite(pt.x.getTime()));
+    }
+    return [];
+  }
+
+  if (!Array.isArray(historyData)) return [];
+
+  if (provider === 'synthetic') {
+    const keyMap = { subscription: 'subscriptionPercent', search: 'searchPercent', toolCalls: 'toolCallsPercent' };
+    const k = keyMap[qName] || qName;
+    return historyData.map(row => ({
+      x: new Date(row.capturedAt),
+      y: row[k] == null ? null : Number(row[k]),
+    })).filter(pt => Number.isFinite(pt.x.getTime()));
+  }
+
+  if (provider === 'zai') {
+    const keyMap = { tokensLimit: 'tokensPercent', timeLimit: 'timePercent', toolCalls: 'toolCallsPercent' };
+    const k = keyMap[qName] || qName;
+    return historyData.map(row => ({
+      x: new Date(row.capturedAt),
+      y: row[k] == null ? null : Number(row[k]),
+    })).filter(pt => Number.isFinite(pt.x.getTime()));
+  }
+
+  return historyData.map(row => {
+    let val = null;
+    if (Array.isArray(row.quotas)) {
+      const found = row.quotas.find(item => item && item.name === qName);
+      if (found) {
+        val = found.utilization != null ? found.utilization : found.usagePercent;
+      }
+    } else if (row[qName] != null) {
+      val = row[qName];
+    }
+    return {
+      x: new Date(row.capturedAt),
+      y: val == null ? null : Number(val),
+    };
+  }).filter(pt => Number.isFinite(pt.x.getTime()));
+}
+
+function buildCycleGroupDatasets(provider, historyData, group) {
+  const palette = [
+    { border: '#0D9488', bg: 'rgba(13, 148, 136, 0.08)' },
+    { border: '#F59E0B', bg: 'rgba(245, 158, 11, 0.08)' },
+    { border: '#3B82F6', bg: 'rgba(59, 130, 246, 0.08)' },
+    { border: '#8B5CF6', bg: 'rgba(139, 92, 246, 0.08)' },
+    { border: '#EC4899', bg: 'rgba(236, 72, 153, 0.08)' },
+  ];
+
+  const datasets = [];
+  let maxDataMs = group.cycleStartMs;
+  const tsSet = new Set([group.cycleStartMs]);
+
+  group.quotas.forEach((q, idx) => {
+    const color = palette[idx % palette.length];
+    const allPts = extractQuotaHistoryPoints(provider, historyData, q);
+    const inCycle = allPts.filter(pt => {
+      const ms = pt.x.getTime();
+      return ms >= group.cycleStartMs && ms <= group.cycleEndMs;
+    });
+    inCycle.forEach(pt => {
+      const ms = pt.x.getTime();
+      tsSet.add(ms);
+      if (ms > maxDataMs) maxDataMs = ms;
+    });
+
+    const qKey = q.name || q.modelId || `q${idx}`;
+    const label = q.displayName || q.label || qKey;
+    const { data, gapSegments, pointRadii } = processDataWithGaps(inCycle, group.rangeKey);
+    datasets.push({
+      label,
+      data,
+      borderColor: color.border,
+      backgroundColor: color.bg,
+      fill: true,
+      tension: 0.35,
+      borderWidth: 2,
+      pointRadius: pointRadii,
+      pointHoverRadius: 4,
+      hidden: State.hiddenQuotas.has(qKey),
+      spanGaps: true,
+      segment: getSegmentStyle(gapSegments, color.border),
+    });
+  });
+
+  const nowMs = Math.min(Math.max(Date.now(), maxDataMs), group.cycleEndMs);
+  tsSet.add(nowMs);
+  const totalMs = group.cycleEndMs - group.cycleStartMs;
+  const sortedTs = [...tsSet].sort((a, b) => a - b);
+  const projectedData = sortedTs.map(ms => {
+    const ratio = Math.max(0, Math.min(1, (ms - group.cycleStartMs) / totalMs));
+    return { x: new Date(ms), y: Math.round(ratio * 1000) / 10 };
+  });
+
+  datasets.push({
+    label: 'Projected Use',
+    data: projectedData,
+    borderColor: 'rgba(148, 163, 184, 0.9)',
+    backgroundColor: 'transparent',
+    borderDash: [6, 4],
+    borderWidth: 2,
+    fill: false,
+    tension: 0,
+    pointRadius: 0,
+    pointHoverRadius: 4,
+    spanGaps: true,
+    hidden: State.hiddenQuotas.has('__projected_pace__'),
+    _isProjectedPace: true,
+  });
+
+  return datasets;
+}
+
+function renderSubscriptionCycleCharts(provider, currentData, historyData) {
+  const quotas = collectProviderQuotasWithPace(provider, currentData).filter(q => q.cycleStart && q.cycleEnd);
+  const groups = groupQuotasByCycle(quotas);
+
+  destroyCycleCharts();
+
+  if (groups.length === 0) {
+    setChartSectionVisible(false);
+    return false;
+  }
+
+  setChartSectionVisible(true);
+  setRangeSelectorCycleMode(true);
+
+  if (!State.chart) initChart();
+  if (!State.chart) return false;
+
+  const section = document.querySelector('.chart-section');
+  const primaryContainer = section ? section.querySelector('.chart-container') : null;
+
+  groups.forEach((group, idx) => {
+    const datasets = buildCycleGroupDatasets(provider, historyData, group);
+    const resetLabel = formatResetTime(new Date(group.cycleEndMs).toISOString());
+    let xMaxMs = Math.min(Date.now(), group.cycleEndMs);
+    datasets.forEach(ds => {
+      if (Array.isArray(ds.data)) {
+        ds.data.forEach(pt => {
+          if (pt && pt.x instanceof Date) {
+            const ms = pt.x.getTime();
+            if (ms > xMaxMs && ms <= group.cycleEndMs) xMaxMs = ms;
+          }
+        });
+      }
+    });
+    if (xMaxMs <= group.cycleStartMs) xMaxMs = group.cycleEndMs;
+    const elapsedHours = (xMaxMs - group.cycleStartMs) / (1000 * 60 * 60);
+    const elapsedRangeKey = elapsedHours > 25 && elapsedHours <= 48 ? '3d' : cycleRangeKey(xMaxMs - group.cycleStartMs);
+
+    const quotaName = group.quotas.length === 1
+      ? (group.quotas[0].displayName || group.quotas[0].label || group.quotas[0].name)
+      : '';
+    const titleText = quotaName && group.durationLabel
+      ? `${quotaName} · ${group.durationLabel}`
+      : (quotaName || group.durationLabel || 'Cycle');
+
+    if (idx === 0) {
+      if (groups.length > 1 && primaryContainer && primaryContainer.parentNode) {
+        let titleEl = primaryContainer.parentNode.querySelector('.primary-cycle-chart-title');
+        if (!titleEl) {
+          titleEl = document.createElement('div');
+          titleEl.className = 'cycle-chart-title primary-cycle-chart-title';
+          primaryContainer.parentNode.insertBefore(titleEl, primaryContainer);
+        }
+        titleEl.style.cssText = 'display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:10px;';
+        titleEl.innerHTML = `<span>${escapeHTML(titleText)}</span><span class="cycle-chart-subtitle" style="font-size:12px;font-weight:400;color:var(--text-muted);">${escapeHTML(resetLabel)}</span>`;
+      }
+
+      State.chart.data.datasets = datasets;
+      updateTimeScale(State.chart, elapsedRangeKey);
+      State.chart.options.scales.x.min = group.cycleStartMs;
+      State.chart.options.scales.x.max = xMaxMs;
+      State.chart.options.scales.y.min = 0;
+      State.chart.options.scales.y.max = 100;
+      State.chartYMax = 100;
+      State.chart.update();
+      return;
+    }
+
+    if (!section || typeof Chart === 'undefined') return;
+    const block = document.createElement('div');
+    block.className = 'cycle-chart-block';
+    block.innerHTML = `
+      <div class="cycle-chart-title" style="display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:10px;">
+        <span>${escapeHTML(titleText)}</span>
+        <span class="cycle-chart-subtitle" style="font-size:12px;font-weight:400;color:var(--text-muted);">${escapeHTML(resetLabel)}</span>
+      </div>
+      <div class="chart-container"><canvas id="usage-chart-cycle-${idx}"></canvas></div>`;
+    section.appendChild(block);
+
+    const canvas = block.querySelector('canvas');
+    if (!canvas) return;
+    const colors = getThemeColors();
+    const cleanOpts = buildChartOptions(colors, 100, elapsedRangeKey);
+    cleanOpts.scales.x.min = group.cycleStartMs;
+    cleanOpts.scales.x.max = xMaxMs;
+    cleanOpts.scales.y.min = 0;
+    cleanOpts.scales.y.max = 100;
+
+    const chartInstance = new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: { datasets },
+      options: cleanOpts,
+    });
+    State.cycleCharts.push(chartInstance);
+  });
+
+  return true;
+}
+
 function renderProviderKPIHTML(quotas, provider) {
   if (provider === 'zenmux') return zenmuxCardsHTML(quotas);
   if (!Array.isArray(quotas) || quotas.length === 0) {
@@ -8184,7 +8982,9 @@ function renderProviderKPIHTML(quotas, provider) {
         <div class="progress-bar" role="progressbar" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100">
           <div class="progress-fill" style="width: ${Math.max(0, Math.min(percent, 100)).toFixed(1)}%" data-status="${status}"></div>
         </div>
+        ${typeof paceMarkerHTML === 'function' ? paceMarkerHTML(quota) : ''}
       </div>
+      ${typeof paceRowHTML === 'function' ? paceRowHTML(quota) : ''}
       <footer class="card-footer">
         <span class="status-badge" data-status="${status}">
           <svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${statusCfg.icon}"/></svg>
@@ -9247,7 +10047,7 @@ async function fetchCycles() {
   const requestSeq = (State.cyclesRequestSeq || 0) + 1;
   State.cyclesRequestSeq = requestSeq;
   const provider = requestProvider;
-  const loggingHistoryProviders = new Set(['synthetic', 'zai', 'anthropic', 'copilot', 'codex', 'antigravity', 'minimax', 'gemini', 'cursor', 'grok', 'kimi', 'mistral', 'opencode', 'ollama', 'muse', 'commandcode', 'alibaba', 'moonshot', 'deepseek']);
+  const loggingHistoryProviders = new Set(['synthetic', 'zai', 'anthropic', 'copilot', 'codex', 'antigravity', 'minimax', 'gemini', 'cursor', 'grok', 'kimi', 'mistral', 'opencode', 'ollama', 'muse', 'commandcode', 'alibaba', 'moonshot', 'deepseek', 'chutes', 'nvidia', 'googleaistudio']);
 
   // All-accounts overview: fetch each account's logging history and merge,
   // tagging every row with its account name for the combined table.
@@ -9309,14 +10109,21 @@ async function fetchCycles() {
       if (requestProvider === 'codex' && State.codexAccount !== requestAccount) return;
       if (State.cyclesRange !== requestRange) return;
 
-      State.allCyclesData = (data.logs || []).map(log => ({
+      const rawLogs = Array.isArray(data) ? data : (data.logs || []);
+      State.allCyclesData = rawLogs.map(log => ({
         cycleId: log.id,
         cycleStart: log.capturedAt,
         cycleEnd: log.capturedAt,
         totalDelta: 0,
-        crossQuotas: log.crossQuotas || [],
+        crossQuotas: log.crossQuotas || (log.requests24h !== undefined ? [{
+          name: 'voucher',
+          value: log.spentUsd,
+          limit: log.capUsd,
+          percent: log.capUsd > 0 ? (log.spentUsd / log.capUsd) * 100 : 0,
+          format: 'currency'
+        }] : []),
       }));
-      State.cyclesQuotaNames = data.quotaNames || [];
+      State.cyclesQuotaNames = data.quotaNames || (rawLogs.length > 0 && rawLogs[0].requests24h !== undefined ? ['voucher'] : []);
       if (isBalanceProvider(requestProvider)) State.balanceCurrency = data.currency || '';
       State.cyclesPage = 1;
       State.isLoggingHistory = true;
@@ -12773,6 +13580,29 @@ const providerSettingsConfig = {
       { id: 'token', label: 'GitHub PAT', type: 'password', placeholder: 'Not configured', hint: 'GitHub Personal Access Token with the copilot scope. Overrides COPILOT_TOKEN from .env.', sensitive: true },
     ],
   },
+  chutes: {
+    title: 'Chutes',
+    desc: 'Configure Chutes PAYG credit tracking and model discovery. Takes effect immediately on save.',
+    fields: [
+      { id: 'api_key', label: 'API Key', type: 'password', placeholder: 'Not configured (cpk_...)', hint: 'Chutes API key. Overrides CHUTES_API_KEY from .env.', sensitive: true },
+    ],
+  },
+  nvidia: {
+    title: 'NVIDIA NIM',
+    desc: 'Configure NVIDIA NIM API model discovery and rate-limit tracking. Takes effect immediately on save.',
+    fields: [
+      { id: 'api_key', label: 'API Key', type: 'password', placeholder: 'Not configured (nvapi-...)', hint: 'NVIDIA NIM API key. Overrides NVIDIA_API_KEY from .env.', sensitive: true },
+    ],
+  },
+  googleaistudio: {
+    title: 'Google AI Studio',
+    desc: 'Configure Google AI Studio API key (for v1beta/models) and optional GCP project (for Cloud Monitoring request count). Takes effect immediately on save.',
+    fields: [
+      { id: 'api_key', label: 'AI Studio API Key', type: 'password', placeholder: 'Not configured (AIza...)', hint: 'Google AI Studio API key. Overrides GOOGLE_AI_STUDIO_API_KEY / GEMINI_API_KEY.', sensitive: true },
+      { id: 'project', label: 'GCP Project ID (optional)', type: 'text', placeholder: 'my-gcp-project', hint: 'Optional GCP project ID for Cloud Monitoring request_count.' },
+      { id: 'cap_usd', label: 'Monthly Voucher Cap ($)', type: 'number', min: 1, max: 10000, default: 15, hint: 'Monthly voucher/budget cap in USD (default $15).' },
+    ],
+  },
   zai: {
     title: 'Z.ai',
     desc: 'Configure Z.ai (ZhipuAI) quota tracking. Changes take effect after daemon restart.',
@@ -14631,19 +15461,32 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupCardModals();
   initNotificationCenter();
 
-  if (document.getElementById('usage-chart') || document.getElementById('both-view') || document.getElementById('all-providers-container')) {
-    initChart();
+  const hasDashboard = document.querySelector('.quota-grid')
+    || document.getElementById('usage-chart')
+    || document.getElementById('both-view')
+    || document.getElementById('all-providers-container')
+    || document.getElementById('api-integrations-dashboard');
 
-    // Critical path: fetch above-fold data in parallel
-    Promise.all([
+  if (hasDashboard) {
+    if (document.getElementById('usage-chart') || document.getElementById('both-view') || document.getElementById('all-providers-container')) {
+      initChart();
+    }
+
+    const activeProvider = getCurrentProvider();
+    // Critical path: fetch above-fold data in parallel (subscription cycle providers
+    // wait for current cycle metadata so the initial history request covers the full cycle).
+    const initialFetches = [
       loadHiddenInsights(),
-      fetchCurrent(),
       fetchDeepInsights(),
-      fetchHistory('6h'),
-    ]);
+    ];
+    if (isSubscriptionCycleChartProvider(activeProvider)) {
+      initialFetches.push(fetchCurrent().finally(() => fetchHistory()));
+    } else {
+      initialFetches.push(fetchCurrent(), fetchHistory('6h'));
+    }
+    Promise.all(initialFetches);
 
     // Preload providers whose history tables should appear immediately.
-    const activeProvider = getCurrentProvider();
     const eagerHistoryProviders = new Set(['antigravity', 'minimax', 'gemini', 'cursor']);
     if (eagerHistoryProviders.has(activeProvider)) {
       if (shouldShowCyclesTable(activeProvider)) {

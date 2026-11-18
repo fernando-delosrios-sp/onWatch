@@ -78,6 +78,7 @@ func (h *Handler) buildGeminiCurrentOK() (response map[string]interface{}, readO
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("gemini"))
+	EnrichSubscriptionPace("gemini", response, now)
 	return response, true, true
 }
 

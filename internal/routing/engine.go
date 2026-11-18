@@ -86,12 +86,13 @@ func EvaluatePoolStatus(p Pool, h PoolHealth, reading ProbeReading, now time.Tim
 	}
 
 	// Effective dollar cap / spend.
+	// Respect an explicit user-configured cap when set; otherwise fall back to the provider probe limit.
 	effectiveCap := p.CapUSD
 	if effectiveCap <= 0 && reading.LimitUSD > 0 {
 		effectiveCap = reading.LimitUSD
 	}
 	effectiveSpent := cycleAdjustedSpent(p, now)
-	if reading.HasSpendData && reading.SpentUSD > effectiveSpent {
+	if reading.HasSpendData && (NormalizeCategory(p.Category) == CategoryPAYG || reading.SpentUSD > effectiveSpent) {
 		effectiveSpent = reading.SpentUSD
 	}
 	st.EffectiveCapUSD = effectiveCap
@@ -108,8 +109,8 @@ func EvaluatePoolStatus(p Pool, h PoolHealth, reading ProbeReading, now time.Tim
 		if dollarShare > usedShare {
 			usedShare = dollarShare
 		}
-		if len(st.Windows) == 0 && p.ResetDay >= 1 && p.ResetDay <= 31 {
-			start, end := MonthlyCycleBounds(now, p.ResetDay)
+		if len(st.Windows) == 0 {
+			start, end := CycleBounds(now, p.ResetCycle, p.ResetDay)
 			if end.After(start) {
 				elapsedShare = clampFloat(float64(now.Sub(start))/float64(end.Sub(start)), 0, 1)
 			}
@@ -152,7 +153,7 @@ func EvaluatePoolStatus(p Pool, h PoolHealth, reading ProbeReading, now time.Tim
 	} else if p.Category == CategoryFree && (h.ConsecutiveErrors >= 2 || h.ErrorRate >= 0.5 || h.HealthScore < 40) {
 		st.Eligible = false
 		st.IneligibleReason = fmt.Sprintf("unhealthy (score %.0f, err_rate %.0f%%)", h.HealthScore, h.ErrorRate*100)
-	} else if reading.Exhausted || (p.Category == CategoryMonthlyCooldown && st.UsedShare >= 1.0) {
+	} else if reading.Exhausted || (NormalizeCategory(p.Category) == CategorySubscription && st.UsedShare >= 1.0) {
 		st.Eligible = false
 		st.IneligibleReason = "quota exhausted"
 	} else if effectiveCap > 0 && (effectiveCap-effectiveSpent-p.ReserveUSD) <= 1e-6 {
@@ -170,19 +171,19 @@ func EvaluatePoolStatus(p Pool, h PoolHealth, reading ProbeReading, now time.Tim
 }
 
 func assignWaterfallBucket(cat PoolCategory, onPace bool) (int, string) {
-	switch cat {
+	switch NormalizeCategory(cat) {
 	case CategoryFree:
 		return 1, "free"
-	case CategoryMonthlyCooldown:
+	case CategorySubscription:
 		if onPace {
-			return 2, "monthly_cooldown_on_pace"
+			return 2, "subscription_on_pace"
 		}
-		return 4, "monthly_cooldown_ahead"
-	case CategoryMonthlyNoCooldown:
+		return 4, "subscription_ahead"
+	case CategoryAllowance:
 		if onPace {
-			return 3, "monthly_no_cooldown_on_pace"
+			return 3, "allowance_on_pace"
 		}
-		return 5, "monthly_no_cooldown_ahead"
+		return 5, "allowance_ahead"
 	case CategoryPAYG:
 		return 6, "payg"
 	default:
@@ -274,7 +275,7 @@ func (e *Engine) SelectRouteWithOptions(ctx context.Context, opts RouteOptions, 
 	stickyEligible := false
 	if stickyReq != "" {
 		for _, st := range statuses {
-			if st.Pool.ID == stickyReq && st.Eligible {
+			if st.Pool.ID == stickyReq && st.Eligible && !(opts.ExcludeFree && st.Pool.Category == CategoryFree) {
 				stickyEligible = true
 				break
 			}
@@ -311,7 +312,10 @@ func (e *Engine) SelectRouteWithOptions(ctx context.Context, opts RouteOptions, 
 			if !st.Eligible {
 				continue
 			}
-			poolModels := filterTierPoolModels(models, tier, st.Pool.ID, harnessSet, excluded)
+			if opts.ExcludeFree && st.Pool.Category == CategoryFree {
+				continue
+			}
+			poolModels := filterTierPoolModels(models, tier, st.Pool.ID, harnessSet, excluded, opts.ExcludeFree)
 			if len(poolModels) == 0 {
 				continue
 			}
@@ -420,10 +424,25 @@ func isModelExcluded(m RouteModel, excluded map[string]bool) bool {
 	return false
 }
 
-func filterTierPoolModels(models []RouteModel, tier Tier, poolID string, harnessSet map[string]bool, excluded map[string]bool) []RouteModel {
+func isFreeRouteModel(m RouteModel) bool {
+	if strings.EqualFold(strings.TrimSpace(m.Billing), "free") {
+		return true
+	}
+	mid := strings.ToLower(strings.TrimSpace(m.ModelID))
+	if strings.HasSuffix(mid, ":free") || mid == "openrouter/free" {
+		return true
+	}
+	ov := strings.ToLower(strings.TrimSpace(m.Overlay))
+	return ov == "@preset/code-nvidia" || ov == "@preset/code-fast-free"
+}
+
+func filterTierPoolModels(models []RouteModel, tier Tier, poolID string, harnessSet map[string]bool, excluded map[string]bool, excludeFree bool) []RouteModel {
 	var out []RouteModel
 	for _, m := range models {
 		if !m.Enabled || m.Tier != tier || m.PoolID != poolID {
+			continue
+		}
+		if excludeFree && isFreeRouteModel(m) {
 			continue
 		}
 		if isModelExcluded(m, excluded) {
@@ -458,27 +477,19 @@ func canonicalCandidateID(harness, provider, model string) string {
 
 func pickHarnessCandidates(poolModels []RouteModel, st PoolStatus) (string, []CandidateModel) {
 	byHarness := make(map[string][]RouteModel)
-	overridePi := false
 	for _, m := range poolModels {
 		byHarness[m.Harness] = append(byHarness[m.Harness], m)
-		if m.Harness != "pi" && m.OverridePiPreference {
-			overridePi = true
-		}
 	}
 
 	var chosenHarness string
-	if piModels, hasPi := byHarness["pi"]; hasPi && !overridePi && len(piModels) > 0 {
-		chosenHarness = "pi"
-	} else {
-		bestPriority := math.MinInt
-		for h, list := range byHarness {
-			sortRouteModels(list)
-			byHarness[h] = list
-			topPrio := list[0].Priority
-			if chosenHarness == "" || topPrio > bestPriority || (topPrio == bestPriority && h < chosenHarness) {
-				chosenHarness = h
-				bestPriority = topPrio
-			}
+	bestPriority := math.MinInt
+	for h, list := range byHarness {
+		sortRouteModels(list)
+		byHarness[h] = list
+		topPrio := list[0].Priority
+		if chosenHarness == "" || topPrio > bestPriority || (topPrio == bestPriority && h == "pi") || (topPrio == bestPriority && chosenHarness != "pi" && h < chosenHarness) {
+			chosenHarness = h
+			bestPriority = topPrio
 		}
 	}
 
@@ -487,21 +498,44 @@ func pickHarnessCandidates(poolModels []RouteModel, st PoolStatus) (string, []Ca
 	statusStr := candidateStatusForBucket(st.WaterfallBucket)
 	candidates := make([]CandidateModel, 0, len(chosen))
 	for _, m := range chosen {
+		modelID := m.ModelID
+		provider := m.Provider
+		if m.Provider == "openrouter" || st.Pool.RoutingProvider == "openrouter" {
+			modelID = GenerateOpenRouterModel(m.Provider, m.ModelID)
+			provider = "openrouter"
+		}
+		inCost := m.InputCostPer1M
+		outCost := m.OutputCostPer1M
+		if inCost == 0 && outCost == 0 {
+			inCost = st.Pool.InputCostPer1M
+			outCost = st.Pool.OutputCostPer1M
+		}
+		billing := m.Billing
+		if billing == "" {
+			switch NormalizeCategory(st.Pool.Category) {
+			case CategoryFree:
+				billing = "free"
+			case CategoryPAYG:
+				billing = "payg"
+			default:
+				billing = "byok"
+			}
+		}
 		candidates = append(candidates, CandidateModel{
-			ID:              canonicalCandidateID(m.Harness, m.Provider, m.ModelID),
+			ID:              canonicalCandidateID(m.Harness, provider, modelID),
 			Tier:            m.Tier,
-			Model:           m.ModelID,
+			Model:           modelID,
 			Pool:            st.Pool.ID,
 			Harness:         m.Harness,
-			Provider:        m.Provider,
+			Provider:        provider,
 			Status:          statusStr,
 			Weight:          st.Pool.Weight,
 			Overlay:         m.Overlay,
-			Billing:         m.Billing,
+			Billing:         billing,
 			Description:     m.Description,
 			Priority:        m.Priority,
-			InputCostPer1M:  m.InputCostPer1M,
-			OutputCostPer1M: m.OutputCostPer1M,
+			InputCostPer1M:  inCost,
+			OutputCostPer1M: outCost,
 		})
 	}
 	return chosenHarness, candidates

@@ -263,6 +263,7 @@ func (h *Handler) buildOllamaCurrentOK() (response map[string]interface{}, readO
 			response["quotas"] = append(response["quotas"].([]interface{}), quotaFromLatest(q, latest.CapturedAt))
 		}
 		applyDisplayModeToResponse(response, h.getDisplayMode("ollama"))
+		EnrichSubscriptionPace("ollama", response, now)
 		return response, true, hasData
 	}
 
@@ -288,6 +289,7 @@ func (h *Handler) buildOllamaCurrentOK() (response map[string]interface{}, readO
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("ollama"))
+	EnrichSubscriptionPace("ollama", response, now)
 	return response, true, hasData
 }
 

@@ -256,6 +256,7 @@ func (h *Handler) buildCursorCurrentOK() (response map[string]interface{}, readO
 			response["quotas"] = append(response["quotas"].([]interface{}), quotaMap)
 		}
 		applyDisplayModeToResponse(response, h.getDisplayMode("cursor"))
+		EnrichSubscriptionPace("cursor", response, now)
 		return response, true, hasData
 	}
 
@@ -299,6 +300,7 @@ func (h *Handler) buildCursorCurrentOK() (response map[string]interface{}, readO
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("cursor"))
+	EnrichSubscriptionPace("cursor", response, now)
 	return response, true, hasData
 }
 

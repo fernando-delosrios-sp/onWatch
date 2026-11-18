@@ -289,7 +289,7 @@ Set `MINIMAX_API_KEY` in your `.env` with your MiniMax Coding Plan API key. Get 
 
 ### How do I track my OpenRouter usage?
 
-Set `OPENROUTER_API_KEY` in your `.env` with your OpenRouter API key. Get one from [openrouter.ai/keys](https://openrouter.ai/keys). onWatch polls the OpenRouter auth key endpoint to track total credits usage, daily/weekly/monthly spending, credit limits, and remaining balance. Works with both free and paid accounts.
+Set `OPENROUTER_API_KEY` in your `.env` with your OpenRouter API key. Get one from [openrouter.ai/keys](https://openrouter.ai/keys). onWatch tracks key usage and its optional spending cap. To show account-wide credits when the key has no cap, also set `OPENROUTER_MANAGEMENT_KEY` to a separate OpenRouter management key. Account usage includes other keys and top-ups change the total. Management keys have elevated privileges; protect your `.env` and never commit it.
 
 ### Does onWatch work with Cline, Roo Code, Kilo Code, or Claude Code?
 

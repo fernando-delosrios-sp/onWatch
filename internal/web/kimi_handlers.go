@@ -152,6 +152,7 @@ func (h *Handler) buildKimiCurrentOK() (response map[string]interface{}, readOK 
 			response["summary"] = sm
 		}
 	}
+	EnrichSubscriptionPace("kimi", response, now)
 	return response, readOK, hasData
 }
 

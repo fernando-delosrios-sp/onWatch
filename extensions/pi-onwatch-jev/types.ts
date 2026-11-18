@@ -23,6 +23,10 @@ export interface RouteCandidate {
   tier: Tier;
   description: string;
   pool?: string;
+  overlay?: string;
+  billing?: string;
+  underlyingModel?: string;
+  underlyingModels?: string[];
   status?: CandidateStatus;
   weight?: number;
   capabilities?: {
@@ -58,6 +62,7 @@ export interface RouteQueryOptions {
   tier?: Tier;
   pool?: string;
   exclude?: readonly string[];
+  excludeFree?: boolean;
   signal?: AbortSignal;
 }
 

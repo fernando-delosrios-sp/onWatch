@@ -445,6 +445,21 @@
             mask-image: url("/static/icons/deepseek.svg");
         }
 
+        .provider-icon-chutes {
+            -webkit-mask-image: url("/static/icons/chutes.svg");
+            mask-image: url("/static/icons/chutes.svg");
+        }
+
+        .provider-icon-googleaistudio {
+            -webkit-mask-image: url("/static/icons/googleaistudio.svg");
+            mask-image: url("/static/icons/googleaistudio.svg");
+        }
+
+        .provider-icon-nvidia {
+            -webkit-mask-image: url("/static/icons/nvidia.svg");
+            mask-image: url("/static/icons/nvidia.svg");
+        }
+
         .status-warning .provider-icon {
             color: var(--warning);
         }
@@ -3802,6 +3817,12 @@
                     return "provider-icon-moonshot";
                 case "deepseek":
                     return "provider-icon-deepseek";
+                case "chutes":
+                    return "provider-icon-chutes";
+                case "googleaistudio":
+                    return "provider-icon-googleaistudio";
+                case "nvidia":
+                    return "provider-icon-nvidia";
                 default:
                     return "provider-icon-openai";
                 }

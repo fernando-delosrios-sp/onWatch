@@ -2,29 +2,33 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"time"
 )
 
 // Custom errors for OpenRouter API failures.
 var (
-	ErrOpenRouterUnauthorized    = errors.New("openrouter: unauthorized - invalid API key")
-	ErrOpenRouterRateLimited     = errors.New("openrouter: rate limited")
-	ErrOpenRouterServerError     = errors.New("openrouter: server error")
-	ErrOpenRouterNetworkError    = errors.New("openrouter: network error")
-	ErrOpenRouterInvalidResponse = errors.New("openrouter: invalid response")
+	ErrOpenRouterUnauthorized          = errors.New("openrouter: unauthorized - invalid API key")
+	ErrOpenRouterRateLimited           = errors.New("openrouter: rate limited")
+	ErrOpenRouterServerError           = errors.New("openrouter: server error")
+	ErrOpenRouterNetworkError          = errors.New("openrouter: network error")
+	ErrOpenRouterInvalidResponse       = errors.New("openrouter: invalid response")
+	ErrOpenRouterManagementKeyRequired = errors.New("openrouter: management key required")
 )
 
 // OpenRouterClient is an HTTP client for the OpenRouter API.
 type OpenRouterClient struct {
-	httpClient *http.Client
-	apiKey     string
-	baseURL    string
-	logger     *slog.Logger
+	httpClient    *http.Client
+	apiKey        string
+	managementKey string
+	baseURL       string
+	logger        *slog.Logger
 }
 
 // OpenRouterOption configures an OpenRouterClient.
@@ -35,6 +39,70 @@ func WithOpenRouterBaseURL(url string) OpenRouterOption {
 	return func(c *OpenRouterClient) {
 		c.baseURL = url
 	}
+}
+
+// WithOpenRouterManagementKey configures the separate account credits credential.
+func WithOpenRouterManagementKey(key string) OpenRouterOption {
+	return func(c *OpenRouterClient) { c.managementKey = key }
+}
+
+// OpenRouterAccountCredits is the account-wide purchased and consumed credit total.
+type OpenRouterAccountCredits struct {
+	TotalCredits float64
+	TotalUsage   float64
+}
+
+// FetchCredits reads account-wide credits using either the management key or primary API key.
+func (c *OpenRouterClient) FetchCredits(ctx context.Context) (*OpenRouterAccountCredits, error) {
+	key := c.managementKey
+	if key == "" {
+		key = c.apiKey
+	}
+	if key == "" {
+		return nil, ErrOpenRouterManagementKeyRequired
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, c.baseURL+"/api/v1/credits", nil)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter: creating credits request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("User-Agent", "onwatch/1.0")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("%w: %v", ErrOpenRouterNetworkError, err)
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusOK:
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return nil, ErrOpenRouterUnauthorized
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return nil, ErrOpenRouterRateLimited
+	case resp.StatusCode >= 500:
+		return nil, fmt.Errorf("%w: status %d", ErrOpenRouterServerError, resp.StatusCode)
+	default:
+		return nil, fmt.Errorf("openrouter: unexpected credits status %d", resp.StatusCode)
+	}
+	var payload struct {
+		Data *struct {
+			TotalCredits *float64 `json:"total_credits"`
+			TotalUsage   *float64 `json:"total_usage"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&payload); err != nil || payload.Data == nil || payload.Data.TotalCredits == nil || payload.Data.TotalUsage == nil {
+		return nil, ErrOpenRouterInvalidResponse
+	}
+	credits, usage := *payload.Data.TotalCredits, *payload.Data.TotalUsage
+	if credits < 0 || usage < 0 || math.IsNaN(credits) || math.IsInf(credits, 0) || math.IsNaN(usage) || math.IsInf(usage, 0) {
+		return nil, ErrOpenRouterInvalidResponse
+	}
+	return &OpenRouterAccountCredits{TotalCredits: credits, TotalUsage: usage}, nil
 }
 
 // WithOpenRouterTimeout sets a custom timeout (for testing).

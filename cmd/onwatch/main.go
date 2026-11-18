@@ -1166,7 +1166,7 @@ func run() error {
 
 	var openrouterClient *api.OpenRouterClient
 	if cfg.HasProvider("openrouter") {
-		openrouterClient = api.NewOpenRouterClient(cfg.OpenRouterAPIKey, logger)
+		openrouterClient = api.NewOpenRouterClient(cfg.OpenRouterAPIKey, logger, api.WithOpenRouterManagementKey(cfg.OpenRouterManagementKey))
 		logger.Info("OpenRouter API client configured")
 	}
 
@@ -1462,6 +1462,9 @@ func run() error {
 	if cfg.HasProvider("deepseek") {
 		deepseekTr = tracker.NewDeepSeekTracker(db, logger)
 	}
+	chutesTr := tracker.NewChutesTracker(db, logger)
+	nvidiaTr := tracker.NewNvidiaTracker(db, logger)
+	googleAIStudioTr := tracker.NewGoogleAIStudioTracker(db, logger)
 
 	var geminiTr *tracker.GeminiTracker
 	if cfg.HasProvider("gemini") {
@@ -1929,6 +1932,15 @@ func run() error {
 			notifier.Check(notify.QuotaStatus{Provider: "deepseek", QuotaKey: quotaName, ResetOccurred: true})
 		})
 	}
+	chutesTr.SetOnReset(func(quotaName string) {
+		notifier.Check(notify.QuotaStatus{Provider: "chutes", QuotaKey: quotaName, ResetOccurred: true})
+	})
+	nvidiaTr.SetOnReset(func(quotaName string) {
+		notifier.Check(notify.QuotaStatus{Provider: "nvidia", QuotaKey: quotaName, ResetOccurred: true})
+	})
+	googleAIStudioTr.SetOnReset(func(quotaName string) {
+		notifier.Check(notify.QuotaStatus{Provider: "googleaistudio", QuotaKey: quotaName, ResetOccurred: true})
+	})
 	if geminiTr != nil {
 		geminiTr.SetOnReset(func(modelID string) {
 			notifier.Check(notify.QuotaStatus{Provider: "gemini", QuotaKey: modelID, ResetOccurred: true})
@@ -2007,6 +2019,9 @@ func run() error {
 	if deepseekTr != nil {
 		handler.SetDeepSeekTracker(deepseekTr)
 	}
+	handler.SetChutesTracker(chutesTr)
+	handler.SetNvidiaTracker(nvidiaTr)
+	handler.SetGoogleAIStudioTracker(googleAIStudioTr)
 	if geminiTr != nil {
 		handler.SetGeminiTracker(geminiTr)
 	}
@@ -2065,6 +2080,57 @@ func run() error {
 	if deepseekAg != nil {
 		agentMgr.RegisterFactory("deepseek", func() (agent.AgentRunner, error) { return deepseekAg, nil })
 	}
+	agentMgr.RegisterFactory("chutes", func() (agent.AgentRunner, error) {
+		snapshot := cfg.Snapshot()
+		if !snapshot.HasProvider("chutes") {
+			return nil, fmt.Errorf("chutes: set CHUTES_API_KEY in Settings -> Providers")
+		}
+		var opts []api.ChutesOption
+		if snapshot.ChutesBaseURL != "" {
+			opts = append(opts, api.WithChutesBaseURL(snapshot.ChutesBaseURL))
+		}
+		if snapshot.ChutesModelsURL != "" {
+			opts = append(opts, api.WithChutesModelsURL(snapshot.ChutesModelsURL))
+		}
+		client := api.NewChutesClient(snapshot.ChutesAPIKey, logger, opts...)
+		sm := agent.NewSessionManager(db, "chutes", idleTimeout, logger)
+		ag := agent.NewChutesAgent(client, db, chutesTr, snapshot.PollInterval, logger, sm)
+		ag.SetNotifier(notifier)
+		ag.SetPollingCheck(func() bool { return isPollingEnabled("chutes") })
+		return ag, nil
+	})
+	agentMgr.RegisterFactory("nvidia", func() (agent.AgentRunner, error) {
+		snapshot := cfg.Snapshot()
+		if !snapshot.HasProvider("nvidia") {
+			return nil, fmt.Errorf("nvidia: set NVIDIA_API_KEY in Settings -> Providers")
+		}
+		var opts []api.NvidiaOption
+		if snapshot.NvidiaBaseURL != "" {
+			opts = append(opts, api.WithNvidiaBaseURL(snapshot.NvidiaBaseURL))
+		}
+		client := api.NewNvidiaClient(snapshot.NvidiaAPIKey, logger, opts...)
+		sm := agent.NewSessionManager(db, "nvidia", idleTimeout, logger)
+		ag := agent.NewNvidiaAgent(client, db, nvidiaTr, snapshot.PollInterval, logger, sm)
+		ag.SetNotifier(notifier)
+		ag.SetPollingCheck(func() bool { return isPollingEnabled("nvidia") })
+		return ag, nil
+	})
+	agentMgr.RegisterFactory("googleaistudio", func() (agent.AgentRunner, error) {
+		snapshot := cfg.Snapshot()
+		if !snapshot.HasProvider("googleaistudio") {
+			return nil, fmt.Errorf("googleaistudio: set API key or GCP project in Settings -> Providers")
+		}
+		var opts []api.GoogleAIStudioOption
+		if snapshot.GoogleAIStudioBaseURL != "" {
+			opts = append(opts, api.WithGoogleAIStudioBaseURL(snapshot.GoogleAIStudioBaseURL))
+		}
+		client := api.NewGoogleAIStudioClient(snapshot.GoogleAIStudioAPIKey, snapshot.GoogleAIStudioProject, snapshot.GoogleAIStudioCapUSD, logger, opts...)
+		sm := agent.NewSessionManager(db, "googleaistudio", idleTimeout, logger)
+		ag := agent.NewGoogleAIStudioAgent(client, db, googleAIStudioTr, snapshot.PollInterval, logger, sm)
+		ag.SetNotifier(notifier)
+		ag.SetPollingCheck(func() bool { return isPollingEnabled("googleaistudio") })
+		return ag, nil
+	})
 	if geminiAg != nil {
 		agentMgr.RegisterFactory("gemini", func() (agent.AgentRunner, error) { return geminiAg, nil })
 	}
@@ -2201,7 +2267,7 @@ func run() error {
 
 	// Start configured agents through the manager.
 	startedAny := false
-	for _, providerKey := range []string{"synthetic", "zai", "anthropic", "copilot", "codex", "antigravity", "minimax", "openrouter", "gemini", "cursor", "grok", "kimi", "moonshot", "deepseek", "opencode", "mistral", "ollama", "muse", "commandcode", "zenmux", "alibaba"} {
+	for _, providerKey := range []string{"synthetic", "zai", "anthropic", "copilot", "codex", "antigravity", "minimax", "openrouter", "gemini", "cursor", "grok", "kimi", "moonshot", "deepseek", "chutes", "nvidia", "googleaistudio", "opencode", "mistral", "ollama", "muse", "commandcode", "zenmux", "alibaba"} {
 		if !isPollingEnabled(providerKey) {
 			continue
 		}

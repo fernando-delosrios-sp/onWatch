@@ -90,6 +90,32 @@ else
   run ln -s "$SCRIPT_DIR" "$TARGET_LINK"
 fi
 
+if [ -f "$PI_AGENT_DIR/settings.json" ] && [ "$DRY_RUN" -eq 0 ]; then
+  node -e "
+    const fs = require('fs');
+    const p = '$PI_AGENT_DIR/settings.json';
+    try {
+      const s = JSON.parse(fs.readFileSync(p, 'utf8'));
+      let changed = false;
+      if (Array.isArray(s.enabledModels)) {
+        if (!s.enabledModels.includes('openrouter/**') && !s.enabledModels.includes('*')) {
+          s.enabledModels.push('openrouter/**');
+          changed = true;
+          console.log('  Pi settings: added openrouter/** to enabledModels in ' + p);
+        }
+      }
+      if (s.defaultProvider === 'openrouter' && s.defaultModel === '@preset/code-auto') {
+        s.defaultModel = '@preset/jev-routing';
+        changed = true;
+        console.log('  Pi settings: updated defaultModel from @preset/code-auto to @preset/jev-routing in ' + p);
+      }
+      if (changed) {
+        fs.writeFileSync(p, JSON.stringify(s, null, 2) + '\n');
+      }
+    } catch (_) {}
+  " 2>/dev/null || true
+fi
+
 echo ""
 echo "Installed pi-onwatch-jev."
 echo "  Extension: $TARGET_LINK -> $SCRIPT_DIR"

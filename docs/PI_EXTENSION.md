@@ -22,10 +22,11 @@ Source lives in [`extensions/pi-onwatch-jev`](../extensions/pi-onwatch-jev).
 
 **You do not need to save your OpenRouter API key in a second place.**
 
-For Jev SystemOne requests (`POST https://openrouter.ai/api/v1/systemone` with `model: "~typesafe/jev-latest"`), `pi-onwatch-jev` resolves credentials in this order:
+For Jev SystemOne requests (`POST https://openrouter.ai/api/v1/systemone` with `model: "~typesafe/jev-latest"`), `pi-onwatch-jev` resolves credentials in this order (each unique key is tried until one succeeds):
 
 1. `OPENROUTER_API_KEY` environment variable (if set)
 2. Pi's existing OpenRouter credential via `ctx.modelRegistry.getApiKeyForProvider("openrouter")`, which reads `~/.pi/agent/auth.json` automatically
+3. The OpenRouter API key saved in the local onWatch dashboard (`~/.onwatch/data/onwatch.db` `provider_settings`), when present
 
 Direct Pi-logged-in providers returned by `onWatch` (such as `anthropic`, `openai-codex`, `google-antigravity`, etc.) also reuse Pi's existing authentication in `~/.pi/agent/auth.json`.
 
@@ -63,13 +64,19 @@ On startup, `pi-onwatch-jev` registers the `openrouter` provider (`https://openr
 
 | Preset ID | Display Name | Context Window | Max Tokens | Purpose |
 |---|---|---|---|---|
+| `@preset/jev-routing` | Jev Routing (onWatch) | 1,000,000 | 65,536 | Select this to enable onWatch + Jev routing for the session (shell; Jev switches to a real backend each turn) |
 | `@preset/code-auto` | Code Auto | 1,000,000 | 65,536 | Default/fallback OpenRouter route |
-| `@preset/code-nvidia` | NVIDIA Free ($0) | 256,000 | 32,768 | `$0` free pool / intake |
+| `@preset/code-nvidia` | NVIDIA Free ($0) | 256,000 | 32,768 | `$0` free pool legacy preset |
 | `@preset/code-xai` | xAI / SpaceXAI | 256,000 | 65,536 | xAI pool |
 | `@preset/code-google` | Google AI Studio | 1,048,576 | 65,536 | Google AI Studio pool |
-| `@preset/code-chutes` | Chutes PAYG | 202,752 | 32,768 | Chutes PAYG pool |
-| `@preset/code-payg` | OpenRouter PAYG | 1,000,000 | 65,536 | General OpenRouter PAYG pool |
+| `@preset/code-chutes` | Chutes | 202,752 | 32,768 | Chutes pool |
+| `@preset/openrouter` | OpenRouter | 1,000,000 | 65,536 | Direct OpenRouter pool |
 | `@preset/code-fast-free` | Code Fast Free ($0) | 1,000,000 | 32,768 | Retained during transition for `$0` intake |
+
+In addition to `@preset/*` presets, `pi-onwatch-jev` registers and preserves Pi's built-in vetted OpenRouter models (including `nvidia/nemotron-3-ultra-550b-a55b:free`, `nvidia/nemotron-3.5-lightning:free`, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`, and others from `models-store.json`), allowing `onWatch` to select and route exact model IDs directly without requiring a preset overlay.
+
+> [!NOTE]
+> If your `~/.pi/agent/settings.json` specifies `enabledModels`, ensure it includes `"openrouter/**"` (globstar, not `openrouter/*`) so that namespaced models like `openrouter/nvidia/...` are enabled in Pi. `install.sh` configures this automatically.
 
 It also keeps the `classifier:~typesafe/jev-latest` entry registered on `openrouter`. You can override `baseUrl` or the preset list without editing code by creating `~/.pi/agent/pi-onwatch-jev.json` (or setting `PI_ONWATCH_PRESETS_PATH`):
 
@@ -83,7 +90,31 @@ It also keeps the `classifier:~typesafe/jev-latest` entry registered on `openrou
       "contextWindow": 1000000,
       "maxTokens": 65536
     }
-  ]
+  ],
+}
+```
+
+### Opt-in Jev routing (recommended for mixed manual + auto sessions)
+
+By default, Jev + onWatch routing (automatic `setModel()` / `setThinkingLevel()`, `/bad`, `/reroute`) only run while **Jev Routing (onWatch)** (`openrouter/@preset/jev-routing`) is the active Pi model. Pick Anthropic, Codex, a fixed OpenRouter preset, or any other provider login and the extension leaves your model alone.
+
+| Key form | Example |
+|---|---|
+| Jev routing shell (default) | `openrouter/@preset/jev-routing` or `@preset/jev-routing` |
+| Full `provider/id` | `openrouter/@preset/openrouter` |
+| OpenRouter preset id only | `@preset/code-auto` |
+| Direct provider model | `anthropic/claude-opus-4-6` |
+| Legacy always-on routing | `["*"]` in `routingTriggerModels` |
+
+Override triggers without editing the file via `PI_ONWATCH_JEV_ROUTING_TRIGGER_MODELS` (comma-separated). Set `routingTriggerModels` to `[]` to disable Jev routing entirely. Linear intake (Branch B) and the `jev_pick` tool are unchanged.
+
+The **Jev Routing** entry is a shell: before each turn, Jev picks a real paid/BYOK backend from onWatch (`exclude_free=true`, excluding `$0` free pools/models) and Pi switches to it. If routing fails and a turn still needs an OpenRouter fallback, the shell wires through `@preset/code-auto` on the API (`openRouterPresetId` in preset config).
+
+Example: restore pre-2.x behavior where every model was Jev-managed:
+
+```json
+{
+  "routingTriggerModels": ["*"]
 }
 ```
 
@@ -106,7 +137,7 @@ On every routed prompt (Branch A) or new work-thread dispatch (Branch B), `pi-on
 
 ## Branch A: Normal Pi Sessions
 
-1. Queries `GET /api/route?harnesses=pi` (including `pool` when a sticky pool is active and `exclude` for any session-demoted models).
+1. Queries `GET /api/route?harnesses=pi&exclude_free=true` (including `pool` when a sticky pool is active and `exclude` for any session-demoted models), ensuring `Jev Routing (onWatch)` never selects `$0` free pools/models.
 2. Keeps the session sticky to its current pool until that pool caps, cools down, errors, hits HTTP 429, or is demoted via `/bad`.
 3. Runs Jev `~typesafe/jev-latest` on the prompt.
 4. Resolves both OpenRouter presets (`openrouter/@preset/...`) and direct Pi-authenticated models (`anthropic`, `openai-codex`, `google-antigravity`, etc.).
@@ -150,6 +181,7 @@ Query parameters:
 - `harnesses`: comma-separated harness list (`pi` or `pi,cursor,antigravity,grok,claudeAgent,codex`)
 - `pool` (optional): preferred sticky pool name
 - `exclude` (optional): comma-separated model/id keys to omit
+- `exclude_free` (optional): `"true"`/`"1"` to omit `free`-category pools and `free`-billed / `:free` models (used by Branch A `Jev Routing (onWatch)`)
 - `tier` (optional): specific tier filter
 
 Response JSON:
@@ -229,6 +261,7 @@ Request JSON:
 | `OPENROUTER_API_KEY` | Pi `auth.json` | Optional override for OpenRouter Jev SystemOne auth |
 | `PI_ONWATCH_JEV_URL` / `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Override Jev SystemOne base URL |
 | `PI_ONWATCH_PRESETS_PATH` | `~/.pi/agent/pi-onwatch-jev.json` | Optional custom OpenRouter presets config file |
+| `PI_ONWATCH_JEV_ROUTING_TRIGGER_MODELS` | defaults to Jev Routing shell | Comma-separated `provider/id` keys; use `*` for legacy always-on routing |
 
 ## Testing
 
@@ -242,4 +275,5 @@ node --test extensions/pi-onwatch-jev/test/*.test.ts
 
 - **Status shows `fallback: Could not reach onWatch...`**: Start `onwatch` (or check `~/.onwatch/port` / `ONWATCH_URL`). Pi stays on your configured default model until `onWatch` responds.
 - **Status shows `fallback: No OpenRouter API key available`**: Run `/login openrouter` in Pi (saved in `~/.pi/agent/auth.json`) or export `OPENROUTER_API_KEY`.
+- **Status shows `fallback: ... guardrails ... jev-latest`**: OpenRouter workspace guardrails are blocking `~typesafe/jev-latest` on the Pi OpenRouter key. Allow TypeSafe/Jev in [OpenRouter guardrails](https://openrouter.ai/settings/privacy), use an unblocked `OPENROUTER_API_KEY`, or save a working key in the onWatch dashboard OpenRouter settings so `pi-onwatch-jev` can fall back to it automatically.
 - **Duplicate OpenRouter models in Pi**: Ensure `~/.pi/agent/extensions/openrouter-presets.ts` was moved out of `extensions/` (re-run `./extensions/pi-onwatch-jev/install.sh`).

@@ -294,6 +294,7 @@ func (h *Handler) buildCommandCodeCurrentOK() (response map[string]interface{}, 
 			response["quotas"] = append(response["quotas"].([]interface{}), quotaFromLatest(q, latest.CapturedAt))
 		}
 		applyDisplayModeToResponse(response, h.getDisplayMode("commandcode"))
+		EnrichSubscriptionPace("commandcode", response, now)
 		return response, true, hasData
 	}
 
@@ -320,6 +321,7 @@ func (h *Handler) buildCommandCodeCurrentOK() (response map[string]interface{}, 
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("commandcode"))
+	EnrichSubscriptionPace("commandcode", response, now)
 	return response, true, hasData
 }
 

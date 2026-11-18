@@ -100,6 +100,12 @@ func (a *OpenRouterAgent) poll(ctx context.Context) {
 	pollSucceeded("openrouter", "")
 	now := time.Now().UTC()
 	snapshot := resp.ToSnapshot(now)
+	credits, err := a.client.FetchCredits(ctx)
+	if err == nil {
+		snapshot.AccountCredits = credits
+	} else if err != api.ErrOpenRouterManagementKeyRequired && ctx.Err() == nil {
+		a.logger.Warn("Failed to fetch OpenRouter account credits", "error", err)
+	}
 
 	if _, err := a.store.InsertOpenRouterSnapshot(snapshot); err != nil {
 		a.logger.Error("Failed to insert OpenRouter snapshot", "error", err)

@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { OPENROUTER_BASE_URL } from "./presets.ts";
 import {
@@ -45,23 +49,88 @@ export interface JevClientConfig {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   env?: NodeJS.ProcessEnv;
+  /** Home directory for ~/.onwatch SQLite fallback lookup (defaults to os.homedir()). */
+  home?: string;
+}
+
+export function readOnWatchOpenRouterApiKey(home: string = homedir()): string | undefined {
+  const dbPath = join(home, ".onwatch", "data", "onwatch.db");
+  if (!existsSync(dbPath)) return undefined;
+  try {
+    const row = execFileSync(
+      "sqlite3",
+      [dbPath, "SELECT value FROM settings WHERE key='provider_settings' LIMIT 1;"],
+      { encoding: "utf8", timeout: 2000 },
+    ).trim();
+    if (!row) return undefined;
+    const parsed = JSON.parse(row) as { openrouter?: { api_key?: string } };
+    const key = parsed?.openrouter?.api_key?.trim();
+    return key || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function pushUniqueKey(keys: string[], key: string | undefined): void {
+  const trimmed = key?.trim();
+  if (!trimmed) return;
+  if (!keys.includes(trimmed)) keys.push(trimmed);
+}
+
+/** Ordered OpenRouter keys for Jev SystemOne (env, Pi auth.json, onWatch dashboard key). */
+export async function resolveOpenRouterApiKeys(options: {
+  env?: NodeJS.ProcessEnv;
+  modelRegistry?: Pick<ModelRegistry, "getApiKeyForProvider">;
+  home?: string;
+}): Promise<string[]> {
+  const env = options.env ?? process.env;
+  const keys: string[] = [];
+  pushUniqueKey(keys, env.OPENROUTER_API_KEY);
+  if (options.modelRegistry) {
+    try {
+      pushUniqueKey(keys, await options.modelRegistry.getApiKeyForProvider("openrouter"));
+    } catch {
+      // fall through
+    }
+  }
+  pushUniqueKey(keys, readOnWatchOpenRouterApiKey(options.home));
+  return keys;
 }
 
 export async function resolveOpenRouterApiKey(options: {
   env?: NodeJS.ProcessEnv;
   modelRegistry?: Pick<ModelRegistry, "getApiKeyForProvider">;
+  home?: string;
 }): Promise<string | undefined> {
-  const envKey = options.env?.OPENROUTER_API_KEY?.trim();
-  if (envKey) return envKey;
-  if (options.modelRegistry) {
+  const keys = await resolveOpenRouterApiKeys(options);
+  return keys[0];
+}
+
+export function isOpenRouterGuardrailBlock(status: number, bodyText: string): boolean {
+  if (status !== 404) return false;
+  const lower = bodyText.toLowerCase();
+  return lower.includes("guardrail") || lower.includes("model-ignored-by-guardrail") || lower.includes("data policy");
+}
+
+export function formatOpenRouterHttpError(status: number, bodyText: string): string {
+  if (isOpenRouterGuardrailBlock(status, bodyText)) {
+    let configureUrl = "https://openrouter.ai/settings/privacy";
     try {
-      const regKey = await options.modelRegistry.getApiKeyForProvider("openrouter");
-      if (regKey?.trim()) return regKey.trim();
+      const parsed = JSON.parse(bodyText) as {
+        error?: { message?: string; metadata?: { ineligibility_reasons?: { configure_url?: string }[] } };
+      };
+      const reasons = parsed?.error?.metadata?.ineligibility_reasons;
+      const fromMeta = reasons?.find((r) => typeof r.configure_url === "string")?.configure_url;
+      if (fromMeta) configureUrl = fromMeta;
     } catch {
-      // fall through
+      // use default help URL
     }
+    return (
+      `OpenRouter blocked ~typesafe/jev-latest on this API key (workspace guardrails/data policy). ` +
+      `Allow TypeSafe/Jev in OpenRouter guardrails (${configureUrl}) or set OPENROUTER_API_KEY to an unblocked key`
+    );
   }
-  return undefined;
+  return `Jev SystemOne returned HTTP ${status}${bodyText ? `: ${bodyText.slice(0, 200)}` : ""}`;
 }
 
 export function buildJevRequest(input: JevClassifyInput): SystemOneRequest {
@@ -232,6 +301,7 @@ export class HttpJevClient implements JevClient {
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly home: string;
 
   constructor(config: JevClientConfig = {}) {
     const env = config.env ?? process.env;
@@ -242,61 +312,76 @@ export class HttpJevClient implements JevClient {
     this.timeoutMs = config.timeoutMs ?? DEFAULT_JEV_TIMEOUT_MS;
     this.fetchImpl = config.fetchImpl ?? globalThis.fetch;
     this.env = env;
+    this.home = config.home ?? homedir();
   }
 
   async classify(input: JevClassifyInput): Promise<JevDecision> {
-    const apiKey =
-      this.explicitKey?.trim() ||
-      this.env.OPENROUTER_API_KEY?.trim() ||
-      (this.resolveKeyFn ? (await this.resolveKeyFn())?.trim() : undefined);
+    const apiKeys: string[] = [];
+    pushUniqueKey(apiKeys, this.explicitKey);
+    pushUniqueKey(apiKeys, this.env.OPENROUTER_API_KEY);
+    if (this.resolveKeyFn) {
+      const resolved = await this.resolveKeyFn();
+      pushUniqueKey(apiKeys, resolved);
+    }
+    pushUniqueKey(apiKeys, readOnWatchOpenRouterApiKey(this.home));
 
-    if (!apiKey) {
-      throw new JevError("auth", "No OpenRouter API key available (OPENROUTER_API_KEY or Pi auth.json)");
+    if (apiKeys.length === 0) {
+      throw new JevError(
+        "auth",
+        "No OpenRouter API key available (OPENROUTER_API_KEY, Pi auth.json, or onWatch OpenRouter settings)",
+      );
     }
 
     const payload = buildJevRequest(input);
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout;
 
-    let response: Response;
-    try {
-      response = await this.fetchImpl(this.endpointUrl, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json",
-          accept: "application/json",
-        },
-        body: JSON.stringify(payload),
-        signal,
-      });
-    } catch (err) {
-      const e = err as { name?: string; message?: string };
-      if (e?.name === "TimeoutError" || e?.name === "AbortError") {
-        throw new JevError("timeout", `Jev SystemOne timed out after ${this.timeoutMs}ms`);
+    let lastHttpError: JevError | undefined;
+
+    for (const apiKey of apiKeys) {
+      let response: Response;
+      try {
+        response = await this.fetchImpl(this.endpointUrl, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${apiKey}`,
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify(payload),
+          signal,
+        });
+      } catch (err) {
+        const e = err as { name?: string; message?: string };
+        if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+          throw new JevError("timeout", `Jev SystemOne timed out after ${this.timeoutMs}ms`);
+        }
+        throw new JevError("unreachable", `Jev SystemOne request failed: ${e?.message ?? String(err)}`);
       }
-      throw new JevError("unreachable", `Jev SystemOne request failed: ${e?.message ?? String(err)}`);
+
+      if (response.status === 401 || response.status === 403) {
+        throw new JevError("auth", `Jev SystemOne rejected OpenRouter auth (${response.status})`, response.status);
+      }
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        const formatted = formatOpenRouterHttpError(response.status, text);
+        lastHttpError = new JevError("http", formatted, response.status);
+        if (isOpenRouterGuardrailBlock(response.status, text) && apiKeys.length > 1) {
+          continue;
+        }
+        throw lastHttpError;
+      }
+
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        throw new JevError("invalid", "Jev SystemOne returned invalid JSON", response.status);
+      }
+
+      return parseJevResponse(body, input);
     }
 
-    if (response.status === 401 || response.status === 403) {
-      throw new JevError("auth", `Jev SystemOne rejected OpenRouter auth (${response.status})`, response.status);
-    }
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new JevError(
-        "http",
-        `Jev SystemOne returned HTTP ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
-        response.status,
-      );
-    }
-
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      throw new JevError("invalid", "Jev SystemOne returned invalid JSON", response.status);
-    }
-
-    return parseJevResponse(body, input);
+    throw lastHttpError ?? new JevError("http", "Jev SystemOne request failed");
   }
 }

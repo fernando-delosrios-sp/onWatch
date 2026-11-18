@@ -3,8 +3,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { HttpJevClient, resolveOpenRouterApiKey } from "./jev-client.ts";
 import { handleLinearIntake, isLinearIntakePrompt, SpawnDispatcherCli } from "./linear-intake.ts";
 import { HttpOnWatchClient } from "./onwatch-client.ts";
-import { registerOpenRouterPresets } from "./presets.ts";
+import { modelMatchesRoutingTrigger, registerOpenRouterPresets } from "./presets.ts";
 import {
+  clearManualRoutingSession,
   createInitialSessionState,
   handleBadCommand,
   handleRerouteCommand,
@@ -74,7 +75,8 @@ function filterCandidatesForPick(
 
 export function createExtension(deps: ExtensionDependencies = {}) {
   return function piOnWatchJev(pi: ExtensionAPI): void {
-    registerOpenRouterPresets(pi);
+    const extensionConfig = registerOpenRouterPresets(pi);
+    const routingTriggerModels = extensionConfig.routingTriggerModels;
 
     const state = createInitialSessionState();
     const onWatch: OnWatchClient = deps.onWatch ?? new HttpOnWatchClient();
@@ -138,6 +140,10 @@ export function createExtension(deps: ExtensionDependencies = {}) {
 
       // Branch A: Normal Pi sessions & Pi work threads.
       state.pendingIntakeSummary = undefined;
+      if (!modelMatchesRoutingTrigger(ctx.model, routingTriggerModels)) {
+        clearManualRoutingSession(state);
+        return;
+      }
       await routePiTurn({
         prompt,
         cwd: ctx.cwd,
@@ -165,8 +171,9 @@ export function createExtension(deps: ExtensionDependencies = {}) {
       };
     });
 
-    pi.on("turn_start", async () => {
+    pi.on("turn_start", async (_event, turnCtx) => {
       if (state.pendingIntakeSummary) return;
+      if (!modelMatchesRoutingTrigger(turnCtx.model, routingTriggerModels)) return;
       state.lastTurn = {
         startMs: Date.now(),
         candidate: state.currentCandidate,
@@ -209,6 +216,15 @@ export function createExtension(deps: ExtensionDependencies = {}) {
       description: "Demote current model/pool in onWatch and reroute immediately",
       handler: async (args, ctx) => {
         activeRegistry = ctx.modelRegistry;
+        if (!modelMatchesRoutingTrigger(ctx.model, routingTriggerModels)) {
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              "Jev routing is disabled for the current model. Select openrouter / Jev Routing (onWatch) or see pi-onwatch-jev.json routingTriggerModels.",
+              "warning",
+            );
+          }
+          return;
+        }
         await handleBadCommand({
           args,
           ctx,
@@ -221,6 +237,15 @@ export function createExtension(deps: ExtensionDependencies = {}) {
       description: "Force a fresh onWatch + Jev route pick (use --reset to clear session demotions)",
       handler: async (args, ctx) => {
         activeRegistry = ctx.modelRegistry;
+        if (!modelMatchesRoutingTrigger(ctx.model, routingTriggerModels)) {
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              "Jev routing is disabled for the current model. Select openrouter / Jev Routing (onWatch) or see pi-onwatch-jev.json routingTriggerModels.",
+              "warning",
+            );
+          }
+          return;
+        }
         await handleRerouteCommand({
           args,
           ctx,

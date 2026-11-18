@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildJevRequest,
+  formatOpenRouterHttpError,
   HttpJevClient,
+  isOpenRouterGuardrailBlock,
   JEV_MODEL_ID,
   JevError,
   parseJevResponse,
@@ -36,7 +38,7 @@ const CHUTES: RouteCandidate = {
   model: "@preset/code-chutes",
   id: "openrouter/@preset/code-chutes",
   tier: "workhorse",
-  description: "DeepSeek/Qwen PAYG via Chutes",
+  description: "DeepSeek/Qwen via Chutes",
   pool: "chutes",
 };
 
@@ -73,7 +75,7 @@ test("buildJevRequest creates parallel questions and adds <tier>_model only for 
   assert.ok(req.questions.workhorse_model);
   assert.deepEqual(req.questions.workhorse_model.criteria, {
     "openrouter/@preset/code-google": "Gemini via Google AI Studio with 1M context",
-    "openrouter/@preset/code-chutes": "DeepSeek/Qwen PAYG via Chutes",
+    "openrouter/@preset/code-chutes": "DeepSeek/Qwen via Chutes",
   });
 });
 
@@ -112,6 +114,63 @@ test("parseJevResponse selects <tier>_model choice and falls back if chosen tier
   assert.equal(fallbackDecision.candidate?.id, "openrouter/@preset/code-google");
 });
 
+test("formatOpenRouterHttpError explains OpenRouter guardrail blocks on Jev", () => {
+  const body = JSON.stringify({
+    error: {
+      message: "0 endpoints out of 1 requested are available matching your guardrail restrictions",
+      metadata: {
+        ineligibility_reasons: [{ reason: "model-ignored-by-guardrail", configure_url: "https://openrouter.ai/guardrails" }],
+      },
+    },
+  });
+  assert.equal(isOpenRouterGuardrailBlock(404, body), true);
+  const msg = formatOpenRouterHttpError(404, body);
+  assert.match(msg, /guardrails/i);
+  assert.match(msg, /https:\/\/openrouter\.ai\/guardrails/);
+  assert.match(msg, /jev-latest/i);
+});
+
+test("HttpJevClient retries another OpenRouter key when the first is guardrail-blocked", async () => {
+  const calls: string[] = [];
+  const guardrailBody = JSON.stringify({
+    error: {
+      message: "Model blocked by guardrail",
+      metadata: { ineligibility_reasons: [{ reason: "model-ignored-by-guardrail" }] },
+    },
+  });
+
+  const client = new HttpJevClient({
+    env: { OPENROUTER_API_KEY: "sk-or-blocked" },
+    resolveApiKey: async () => "sk-or-works",
+    fetchImpl: (async (_url, init?: RequestInit) => {
+      const auth = (init?.headers as Record<string, string>).authorization;
+      calls.push(auth);
+      if (auth === "Bearer sk-or-blocked") {
+        return new Response(guardrailBody, { status: 404, headers: { "content-type": "application/json" } });
+      }
+      return new Response(
+        JSON.stringify({
+          answers: {
+            tier: { type: "choice", choice: "lightweight", confidence: 1 },
+            effort: { type: "choice", choice: "low", confidence: 1 },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch,
+  });
+
+  const result = await client.classify({
+    mode: "pi",
+    prompt: "hello",
+    candidatesByTier: { lightweight: [NVIDIA] },
+  });
+  assert.equal(result.tier, "lightweight");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0], "Bearer sk-or-blocked");
+  assert.equal(calls[1], "Bearer sk-or-works");
+});
+
 test("HttpJevClient posts to OpenRouter /systemone with Pi OpenRouter auth", async () => {
   let capturedUrl = "";
   let capturedAuth = "";
@@ -148,7 +207,11 @@ test("HttpJevClient posts to OpenRouter /systemone with Pi OpenRouter auth", asy
   assert.equal(result.effort, "low");
   assert.equal(result.candidate?.id, "openrouter/@preset/code-nvidia");
 
-  const unauthClient = new HttpJevClient({ env: {}, resolveApiKey: async () => undefined });
+  const unauthClient = new HttpJevClient({
+    env: {},
+    home: "/tmp/pi-onwatch-jev-no-onwatch-db",
+    resolveApiKey: async () => undefined,
+  });
   await assert.rejects(
     () =>
       unauthClient.classify({

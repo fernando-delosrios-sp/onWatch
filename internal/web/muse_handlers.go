@@ -305,6 +305,7 @@ func (h *Handler) buildMuseCurrentOK() (response map[string]interface{}, readOK 
 			response["quotas"] = append(response["quotas"].([]interface{}), quotaFromLatest(q, latest.CapturedAt))
 		}
 		applyDisplayModeToResponse(response, h.getDisplayMode("muse"))
+		EnrichSubscriptionPace("muse", response, now)
 		return response, true, hasData
 	}
 
@@ -330,6 +331,7 @@ func (h *Handler) buildMuseCurrentOK() (response map[string]interface{}, readOK 
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("muse"))
+	EnrichSubscriptionPace("muse", response, now)
 	return response, true, hasData
 }
 

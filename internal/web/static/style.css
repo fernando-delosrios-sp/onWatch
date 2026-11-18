@@ -4514,3 +4514,105 @@ body.accounts-overview-mode #sessions-section {
 .provider-intro-settings {
   margin-bottom: 20px;
 }
+
+/* Linear cycle projected pace marker & traffic light */
+.progress-wrapper {
+  position: relative;
+}
+
+.progress-pace-marker {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: var(--text-primary);
+  border-radius: 1px;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  z-index: 2;
+  opacity: 0.85;
+  box-shadow: 0 0 0 1px var(--surface-card, rgba(0, 0, 0, 0.35));
+}
+
+.pace-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: -6px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--text-secondary);
+}
+
+.traffic-light {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 6px;
+  border-radius: var(--radius-full);
+  background: var(--surface-inset, rgba(127, 127, 127, 0.14));
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.2));
+  flex-shrink: 0;
+}
+
+.tl-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  opacity: 0.2;
+  transition: opacity var(--transition-base), box-shadow var(--transition-base);
+}
+
+.tl-dot.tl-red { background: var(--status-critical); }
+.tl-dot.tl-yellow { background: var(--status-warning); }
+.tl-dot.tl-green { background: var(--status-healthy); }
+
+.pace-row[data-pace="red"] .tl-dot.tl-red {
+  opacity: 1;
+  box-shadow: 0 0 6px var(--status-critical);
+}
+.pace-row[data-pace="yellow"] .tl-dot.tl-yellow {
+  opacity: 1;
+  box-shadow: 0 0 6px var(--status-warning);
+}
+.pace-row[data-pace="green"] .tl-dot.tl-green {
+  opacity: 1;
+  box-shadow: 0 0 6px var(--status-healthy);
+}
+
+.pace-label {
+  font-weight: 600;
+}
+.pace-row[data-pace="green"] .pace-label { color: var(--status-healthy-text); }
+.pace-row[data-pace="yellow"] .pace-label { color: var(--status-warning-text); }
+.pace-row[data-pace="red"] .pace-label { color: var(--status-critical-text); }
+
+.pace-comparison {
+  color: var(--text-muted);
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.cycle-chart-block {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.16));
+}
+
+.cycle-chart-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.cycle-chart-subtitle {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+

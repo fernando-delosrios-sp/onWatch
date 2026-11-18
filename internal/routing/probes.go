@@ -83,6 +83,32 @@ func MonthlyCycleBounds(now time.Time, resetDay int) (time.Time, time.Time) {
 	return prevReset, curReset
 }
 
+// CycleBounds calculates the start and end of the current cycle given cycle type ("daily", "weekly", "monthly") and reset day.
+func CycleBounds(now time.Time, cycle string, resetDay int) (time.Time, time.Time) {
+	u := now.UTC()
+	switch strings.ToLower(strings.TrimSpace(cycle)) {
+	case "daily", "24h":
+		start := time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+		end := start.Add(24 * time.Hour)
+		return start, end
+	case "weekly", "7d":
+		weekday := int(u.Weekday())
+		if weekday == 0 {
+			weekday = 7 // Sunday as 7th day, week starts Monday
+		}
+		start := time.Date(u.Year(), u.Month(), u.Day()-weekday+1, 0, 0, 0, 0, time.UTC)
+		end := start.Add(7 * 24 * time.Hour)
+		return start, end
+	case "monthly":
+		fallthrough
+	default:
+		if resetDay < 1 || resetDay > 31 {
+			resetDay = 1
+		}
+		return MonthlyCycleBounds(u, resetDay)
+	}
+}
+
 // WindowElapsedShare computes elapsed fraction [0..1] for a quota window ending at resetsAt.
 func WindowElapsedShare(now time.Time, resetsAt *time.Time, windowHours int) float64 {
 	if resetsAt == nil || windowHours <= 0 {
@@ -134,6 +160,8 @@ func (r *SQLiteProbeReader) ReadProbe(ctx context.Context, p Pool, now time.Time
 		}
 	case "antigravity_3p":
 		return r.readAntigravityPool(ctx, now, "3p", p.WindowHours)
+	case "antigravity_argon":
+		return r.readAntigravityPool(ctx, now, "argon", p.WindowHours)
 	case "antigravity_gemini":
 		return r.readAntigravityPool(ctx, now, "gemini", p.WindowHours)
 	case "antigravity_flash":
@@ -240,27 +268,22 @@ func (r *SQLiteProbeReader) readAntigravityPool(ctx context.Context, now time.Ti
 				matched = append(matched, row)
 			}
 		}
-	case "flash":
+	case "argon":
 		for _, row := range all {
 			id := strings.ToLower(row.modelID)
 			lbl := strings.ToLower(row.label)
-			if strings.Contains(id, "flash") || (strings.Contains(lbl, "flash") && !strings.Contains(lbl, "hydrogen")) {
+			if strings.Contains(id, "argon") || strings.Contains(lbl, "argon") {
 				matched = append(matched, row)
 			}
 		}
-		// agy CLI bundles Gemini 3.8 Flash into gemini-5h / gemini-weekly when no separate flash row exists.
-		if len(matched) == 0 {
-			for _, row := range all {
-				id := strings.ToLower(row.modelID)
-				if id == "gemini-5h" || id == "gemini-weekly" {
-					matched = append(matched, row)
-				}
-			}
-		}
-	case "gemini":
+	case "gemini", "flash":
 		for _, row := range all {
 			id := strings.ToLower(row.modelID)
-			if strings.HasPrefix(id, "gemini-") && !strings.Contains(id, "flash") {
+			lbl := strings.ToLower(row.label)
+			if strings.Contains(id, "argon") || strings.Contains(lbl, "argon") {
+				continue
+			}
+			if strings.HasPrefix(id, "gemini-") || strings.Contains(id, "flash") || strings.Contains(id, "hydrogen") || strings.Contains(lbl, "gemini") {
 				matched = append(matched, row)
 			}
 		}
@@ -654,6 +677,35 @@ func (r *SQLiteProbeReader) readRoutingProbePool(ctx context.Context, p Pool, no
 
 	if err == sql.ErrNoRows {
 		spent := cycleAdjustedSpent(p, now)
+		if p.ID == "chutes" {
+			var snapUsed, snapLimit, snapBalance float64
+			if cErr := r.db.QueryRowContext(ctx, `SELECT used_usd, limit_usd, balance_usd FROM chutes_snapshots ORDER BY captured_at DESC LIMIT 1`).Scan(&snapUsed, &snapLimit, &snapBalance); cErr == nil {
+				eff := p.CapUSD
+				if eff <= 0 && snapLimit > 0 {
+					eff = snapLimit
+				}
+				if snapUsed > spent {
+					spent = snapUsed
+				} else if eff > 0 && snapBalance > 0 && snapBalance < eff && eff-snapBalance > spent {
+					spent = eff - snapBalance
+				}
+				if eff > 0 {
+					usedShare := clampFloat(spent/eff, 0, 1)
+					return ProbeReading{
+						ProbeStatus:   "ok",
+						ProbeSummary:  fmt.Sprintf("%s: $%.2f / $%.2f (%.0f%%)", label, spent, eff, usedShare*100),
+						ResetsAt:      &cycleReset,
+						ElapsedShare:  elapsed,
+						HasQuotaUsage: true,
+						HasSpendData:  true,
+						SpentUSD:      spent,
+						LimitUSD:      eff,
+						UsedShare:     usedShare,
+						Exhausted:     usedShare >= 1.0,
+					}
+				}
+			}
+		}
 		usedShare := 0.0
 		if p.CapUSD > 0 {
 			usedShare = clampFloat(spent/p.CapUSD, 0, 1)
@@ -679,10 +731,20 @@ func (r *SQLiteProbeReader) readRoutingProbePool(ctx context.Context, p Pool, no
 		resetsAt = &cycleReset
 	}
 	effectiveLimit := p.CapUSD
-	if effectiveLimit <= 0 {
+	if effectiveLimit <= 0 && limitUSD > 0 {
 		effectiveLimit = limitUSD
 	}
 	spent := math.Max(cycleAdjustedSpent(p, now), usedUSD)
+	if p.ID == "chutes" && effectiveLimit > 0 {
+		var snapUsed, snapBalance float64
+		if cErr := r.db.QueryRowContext(ctx, `SELECT used_usd, balance_usd FROM chutes_snapshots ORDER BY captured_at DESC LIMIT 1`).Scan(&snapUsed, &snapBalance); cErr == nil {
+			if snapUsed > spent {
+				spent = snapUsed
+			} else if spent == 0 && snapBalance > 0 && snapBalance < effectiveLimit {
+				spent = effectiveLimit - snapBalance
+			}
+		}
+	}
 	share := usedPct / 100.0
 	if effectiveLimit > 0 {
 		dollarShare := clampFloat(spent/effectiveLimit, 0, 1)
@@ -721,23 +783,78 @@ func (r *SQLiteProbeReader) readRoutingProbePool(ctx context.Context, p Pool, no
 
 func (r *SQLiteProbeReader) readOpenRouterPool(ctx context.Context, p Pool, now time.Time) ProbeReading {
 	// Prefer a dedicated PAYG key probe in routing_probe_snapshots if configured.
-	reading := r.readRoutingProbePool(ctx, p, now, "OpenRouter PAYG")
+	reading := r.readRoutingProbePool(ctx, p, now, "OpenRouter")
 	if reading.ProbeStatus == "ok" {
 		return reading
 	}
 
-	// OpenRouter's main key snapshot tracks the primary key; surface its latest timestamp for diagnostics,
-	// while keeping the $5/mo pool spend tracked via caller feedback (since OpenRouter mixes BYOK/PAYG).
+	// Surface account-wide credit balance from openrouter_snapshots if available.
 	var capturedAtStr string
 	var usageMonthly float64
+	var acctCredits, acctUsage sql.NullFloat64
 	if err := r.db.QueryRowContext(ctx, `
-		SELECT captured_at, usage_monthly
+		SELECT captured_at, usage_monthly, account_total_credits, account_total_usage
 		FROM openrouter_snapshots
 		ORDER BY id DESC
 		LIMIT 1
-	`).Scan(&capturedAtStr, &usageMonthly); err == nil {
+	`).Scan(&capturedAtStr, &usageMonthly, &acctCredits, &acctUsage); err == nil {
 		reading.LastPolledAt = parseTimeFlexible(capturedAtStr)
 		reading.ProbeStatus = "ok"
+
+		if acctCredits.Valid && acctCredits.Float64 > 0 && acctUsage.Valid {
+			credits := acctCredits.Float64
+			usage := acctUsage.Float64
+			avail := math.Max(0, credits-usage)
+
+			if p.CapUSD > 0 {
+				availOfCap := math.Min(avail, p.CapUSD)
+				spentOfCap := math.Max(0, p.CapUSD-availOfCap)
+				share := clampFloat(spentOfCap/p.CapUSD, 0, 1)
+
+				reading.HasQuotaUsage = true
+				reading.HasSpendData = true
+				reading.LimitUSD = p.CapUSD
+				reading.SpentUSD = spentOfCap
+				reading.UsedShare = share
+				reading.Exhausted = avail <= 0.0001
+				reading.ProbeSummary = fmt.Sprintf("OpenRouter credits: $%.2f / $%.2f (%.0f%%, $%.2f available)", spentOfCap, p.CapUSD, share*100, avail)
+
+				reading.Windows = []QuotaWindow{
+					{
+						Name:        "openrouter-credits",
+						UsedPercent: share * 100,
+						UsedUSD:     spentOfCap,
+						LimitUSD:    p.CapUSD,
+						UsedShare:   share,
+						Exhausted:   avail <= 0.0001,
+					},
+				}
+				return reading
+			}
+
+			share := clampFloat(usage/credits, 0, 1)
+
+			reading.HasQuotaUsage = true
+			reading.HasSpendData = true
+			reading.LimitUSD = credits
+			reading.SpentUSD = usage
+			reading.UsedShare = share
+			reading.Exhausted = avail <= 0.0001
+			reading.ProbeSummary = fmt.Sprintf("OpenRouter credits: $%.2f / $%.2f (%.0f%%, $%.2f available)", usage, credits, share*100, avail)
+
+			reading.Windows = []QuotaWindow{
+				{
+					Name:        "openrouter-credits",
+					UsedPercent: share * 100,
+					UsedUSD:     usage,
+					LimitUSD:    credits,
+					UsedShare:   share,
+					Exhausted:   avail <= 0.0001,
+				},
+			}
+			return reading
+		}
+
 		reading.ProbeSummary = fmt.Sprintf("Tracked PAYG spend $%.2f / $%.2f (OR acct monthly $%.2f)", reading.SpentUSD, p.CapUSD, usageMonthly)
 	}
 	return reading
@@ -750,13 +867,8 @@ func (r *SQLiteProbeReader) readGoogleAIStudioPool(ctx context.Context, p Pool, 
 		elapsed = clampFloat(float64(now.UTC().Sub(start))/float64(end.Sub(start)), 0, 1)
 	}
 	spent := cycleAdjustedSpent(p, now)
-	share := 0.0
-	if p.CapUSD > 0 {
-		share = clampFloat(spent/p.CapUSD, 0, 1)
-	}
-
-	summary := fmt.Sprintf("Tracked voucher spend $%.2f / $%.2f", spent, p.CapUSD)
 	var lastPolled *time.Time
+	var summary string
 	var extraJSON, capturedAtStr string
 	err := r.db.QueryRowContext(ctx, `
 		SELECT extra_json, captured_at
@@ -774,6 +886,38 @@ func (r *SQLiteProbeReader) readGoogleAIStudioPool(ctx context.Context, p Pool, 
 		if json.Unmarshal([]byte(extraJSON), &extra) == nil && extra.Requests24h > 0 {
 			summary = fmt.Sprintf("$%.2f / $%.2f (%d requests/24h on %s)", spent, p.CapUSD, extra.Requests24h, extra.Project)
 		}
+	} else {
+		var snapSpent, snapCap float64
+		var snapReqs int64
+		var snapProject, snapCapturedAt string
+		if errSnap := r.db.QueryRowContext(ctx, `
+			SELECT spent_usd, cap_usd, requests_24h, project, captured_at
+			FROM google_aistudio_snapshots
+			WHERE spent_usd > 0 OR requests_24h > 0
+			ORDER BY id DESC
+			LIMIT 1
+		`).Scan(&snapSpent, &snapCap, &snapReqs, &snapProject, &snapCapturedAt); errSnap == nil {
+			if snapSpent > spent {
+				spent = snapSpent
+			}
+			if snapCap > 0 && p.CapUSD <= 0 {
+				p.CapUSD = snapCap
+			}
+			if lastPolled == nil {
+				lastPolled = parseTimeFlexible(snapCapturedAt)
+			}
+			if snapReqs > 0 && snapProject != "" {
+				summary = fmt.Sprintf("$%.2f / $%.2f (%d requests/24h on %s)", spent, p.CapUSD, snapReqs, snapProject)
+			}
+		}
+	}
+
+	share := 0.0
+	if p.CapUSD > 0 {
+		share = clampFloat(spent/p.CapUSD, 0, 1)
+	}
+	if summary == "" {
+		summary = fmt.Sprintf("Tracked voucher spend $%.2f / $%.2f", spent, p.CapUSD)
 	}
 
 	cycleReset := end
@@ -805,11 +949,9 @@ func (r *SQLiteProbeReader) readGoogleAIStudioPool(ctx context.Context, p Pool, 
 }
 
 func cycleAdjustedSpent(p Pool, now time.Time) float64 {
-	if p.ResetDay >= 1 && p.ResetDay <= 31 {
-		curStart, _ := MonthlyCycleBounds(now, p.ResetDay)
-		if p.CycleStart != nil && p.CycleStart.Before(curStart) {
-			return 0
-		}
+	curStart, _ := CycleBounds(now, p.ResetCycle, p.ResetDay)
+	if p.CycleStart != nil && p.CycleStart.Before(curStart) {
+		return 0
 	}
 	return math.Max(0, p.SpentUSD)
 }
